@@ -1,0 +1,18 @@
+FROM python:3.11-slim-bookworm
+# 辨識服務只從 modules/vision 建置；ai-recognition-lab 是本機實驗工具，不進正式映像。
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 VISION_DATA_DIR=/data VISION_MODEL_DIR=/app/models VISION_PRODUCTION=1 VISION_LOCK_DATA=1 YOLO_CONFIG_DIR=/tmp/ultralytics
+WORKDIR /app/vision
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+COPY modules/vision/requirements.txt ./
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt gunicorn==23.0.0
+RUN mkdir -p /app/models /data && cd /app/models && python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+COPY modules/vision/vision_core ./vision_core
+COPY modules/vision/vision_http ./vision_http
+COPY modules/vision/vision_ui ./vision_ui
+COPY modules/vision/adapters ./adapters
+COPY modules/vision/config ./config
+COPY modules/vision/contracts ./contracts
+COPY modules/vision/bootstrap.py modules/vision/wsgi.py ./
+EXPOSE 8000
+# 單一 worker：訓練工作與資料目錄由同一程序管理
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "4", "--timeout", "300", "--graceful-timeout", "30", "wsgi:app"]

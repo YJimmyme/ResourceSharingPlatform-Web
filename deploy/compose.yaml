@@ -1,0 +1,42 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      vision:
+        condition: service_healthy
+    restart: unless-stopped
+  vision:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.vision
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Set SUPABASE_SERVICE_ROLE_KEY}
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OPENAI_COMPLEX_MODEL: ${OPENAI_COMPLEX_MODEL:-gpt-4.1}
+      YOLO_REVIEW_THRESHOLD: ${YOLO_REVIEW_THRESHOLD:-0.65}
+      YOLO_INFERENCE_DEVICE: cpu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # 本機 Supabase（supabase start）測試時使用
+    volumes:
+      - vision-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 40s
+volumes:
+  vision-data:

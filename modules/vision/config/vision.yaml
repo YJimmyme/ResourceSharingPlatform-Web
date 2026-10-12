@@ -1,0 +1,45 @@
+# 辨識模組的可調參數。此檔隨程式版本控管；執行期產生的值（啟用模型、校準門檻）存在資料目錄。
+# 環境變數優先於此檔：VISION_DATA_DIR、VISION_MODEL_DIR、YOLO_INFERENCE_DEVICE、YOLO_REVIEW_THRESHOLD。
+
+inference:
+  pretrained_weights: yolo11n.pt   # 通用預訓練權重檔名，位於 VISION_MODEL_DIR
+  imgsz: 640                       # 推論輸入邊長；小物件多可改 960 或 1280（需同步訓練）
+  device: cpu                      # cpu 或 0（GPU）
+  predict_confidence: 0.25         # 工作台「比較結果」的預設顯示門檻
+  recognition_confidence: 0.15     # 正式入庫辨識的偵測下限；低於此值的框直接捨棄
+
+review:
+  threshold: 0.65                  # 任一框信心低於此值 → 交由雲端複核
+  use_calibrated_thresholds: true  # 啟用模型時，採用該模型評估所得的各品項門檻
+  target_precision: 0.9            # 校準目標：門檻以上的框至少要有此精確率
+  min_samples_per_class: 5         # 品項在測試集的框數少於此值時，不做個別校準
+
+catalog:
+  auto_sync_classes: true          # 辨識時把主系統目錄品項加入標註類別（類別順序只增不減）
+
+training:
+  default_epochs: 30
+  max_epochs: 300
+  imgsz: 640
+  batch: 2
+  workers: 0
+  seed: 42
+  amp: false
+  patience: 100                    # 驗證指標多少輪沒進步就提早停止（100 = Ultralytics 預設，與原版相同）
+  augment: {}                      # 直接傳給 Ultralytics 的資料增強參數，例如 {fliplr: 0.5, degrees: 10}
+
+evaluation:
+  confidence: 0.15                 # 保留集評估時計算「完全正確率」使用的門檻
+  sweep_floor: 0.05                # 評估時先以此下限取得所有候選框，再離線掃描各門檻
+  iou_match: 0.5                   # 預測框與人工框 IoU 達此值才算命中
+
+improvement:                       # 「改善建議」頁的提醒標準
+  min_train_boxes: 30
+  min_test_boxes: 5
+  weak_recall: 0.7
+  weak_precision: 0.7
+
+release:
+  regression_gate: true            # 啟用新模型前，須與目前上線模型在同一份保留集比較且不退步
+  max_exact_rate_drop: 0.0         # 允許的「完全正確率」下降幅度
+  max_count_error_increase: 0.0    # 允許的「每張數量誤差」增加幅度

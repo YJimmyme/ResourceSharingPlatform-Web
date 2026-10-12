@@ -1,0 +1,728 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Vision Module API",
+    "version": "1.1.0",
+    "description": "獨立模式限本機使用；正式整合由主系統登入授權（Admin＝管理、Cadre＝辨識與回饋），寫入請求須帶正確 Origin。每條路徑同時提供 /api/v1 前綴版本。標示「整合模式」者只在主系統轉接器啟用時可用。"
+  },
+  "servers": [
+    {
+      "url": "."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "服務識別與版本",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/module": {
+      "get": {
+        "summary": "建模準備狀態、模型及工作歷史",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "summary": "標註清單與目前工作",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/classes": {
+      "post": {
+        "summary": "新增固定類別",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/catalog": {
+      "get": {
+        "summary": "類別與主系統品項ID對應",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      },
+      "post": {
+        "summary": "類別與主系統品項ID對應",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/prepare": {
+      "post": {
+        "summary": "正規化圖片",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/save": {
+      "post": {
+        "summary": "保存已核對逐物件標註",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/sample/{id}": {
+      "get": {
+        "summary": "讀取已保存照片與人工答案",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/predict": {
+      "post": {
+        "summary": "使用指定或已啟用模型辨識圖片",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "apiVersion",
+                    "model",
+                    "objects",
+                    "counts",
+                    "boxes",
+                    "image"
+                  ],
+                  "properties": {
+                    "apiVersion": {
+                      "const": "1.0"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "objects": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DetectedObject"
+                      }
+                    },
+                    "counts": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    },
+                    "boxes": {
+                      "type": "array",
+                      "description": "相容舊版標註工具"
+                    },
+                    "image": {
+                      "type": "string",
+                      "description": "正規化圖片data URL"
+                    },
+                    "elapsedMs": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "image"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "description": "PNG/JPEG/WebP base64 data URL"
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "省略時使用deployment.json的啟用模型"
+                  },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0.01,
+                    "maximum": 0.95,
+                    "default": 0.25
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/train": {
+      "post": {
+        "summary": "非同步啟動訓練或保留集評估",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "train",
+                      "evaluate"
+                    ],
+                    "default": "train"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": "pretrained"
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "epochs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300
+                  },
+                  "device": {
+                    "enum": [
+                      "cpu",
+                      "0"
+                    ]
+                  },
+                  "practiceOnly": {
+                    "type": "boolean"
+                  },
+                  "practiceSample": {
+                    "type": "string",
+                    "description": "單張模式必填的已保存train照片ID"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stop": {
+      "post": {
+        "summary": "停止目前工作",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/export": {
+      "post": {
+        "summary": "建立資料快照及ZIP",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/download/{id}": {
+      "get": {
+        "summary": "下載資料ZIP",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/models/rename": {
+      "post": {
+        "summary": "變更顯示名稱",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/activate": {
+      "post": {
+        "summary": "啟用已評估模型或切回通用模型；預設須與上線模型在同一份保留集比較且不退步，並套用校準的各品項複核門檻",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料条件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/evaluation/{run}": {
+      "get": {
+        "summary": "讀取一次保留集評估的完整報告：數量正確率、各品項精確率／召回率、門檻掃描、校準結果",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          },
+          "404": {
+            "description": "找不到評估"
+          }
+        }
+      }
+    },
+    "/improvement": {
+      "get": {
+        "summary": "改善建議：各品項資料量、回饋統計、上線模型表現與下一步該補的照片",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/recognize": {
+      "post": {
+        "summary": "（整合模式）正式入庫辨識：YOLO 優先，必要時雲端複核，寫入待確認入庫紀錄並回傳回饋 ID",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          },
+          "404": {
+            "description": "獨立模式不提供"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "locationId",
+                  "imagePath"
+                ],
+                "properties": {
+                  "locationId": {
+                    "type": "integer"
+                  },
+                  "imagePath": {
+                    "type": "string"
+                  },
+                  "inputText": {
+                    "type": "string"
+                  },
+                  "complexity": {
+                    "enum": [
+                      "simple",
+                      "complex"
+                    ]
+                  },
+                  "forceReview": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/feedback": {
+      "post": {
+        "summary": "提交辨識修正（每個物件一框）；只保存回饋，不改庫存",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "reviewed"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "boxes": {
+                    "type": "array"
+                  },
+                  "reviewed": {
+                    "type": "boolean"
+                  },
+                  "negative": {
+                    "type": "boolean"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/feedback-list": {
+      "get": {
+        "summary": "回饋清單，依審核優先度排序（模型失手、修正幅度大者在前）",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    },
+    "/approve-feedback": {
+      "post": {
+        "summary": "管理員核准回饋並納入資料集",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "split": {
+                    "enum": [
+                      "train",
+                      "val",
+                      "test"
+                    ]
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/feedback-detail/{id}": {
+      "get": {
+        "summary": "回饋明細與原圖",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "請求或資料條件不符"
+          },
+          "401": {
+            "description": "正式整合登入失效"
+          },
+          "403": {
+            "description": "來源或權限不符"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DetectedObject": {
+        "type": "object",
+        "required": [
+          "itemId",
+          "label",
+          "bbox",
+          "confidence"
+        ],
+        "properties": {
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "bbox": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    }
+  }
+}

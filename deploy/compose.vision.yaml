@@ -1,0 +1,34 @@
+# 只部署 AI 辨識服務。網站仍是 GitHub Pages（愛心轉運站），由主機既有的 HTTPS 反向代理轉到這個容器。
+# 用法：docker compose --env-file deploy/.env.vision -f deploy/compose.vision.yaml up -d --build
+name: rsp-vision
+services:
+  vision:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.vision
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Set SUPABASE_SERVICE_ROLE_KEY}
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN}
+      VISION_PUBLIC_ORIGIN: ${VISION_PUBLIC_ORIGIN:?Set VISION_PUBLIC_ORIGIN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OPENAI_COMPLEX_MODEL: ${OPENAI_COMPLEX_MODEL:-gpt-4.1}
+      YOLO_REVIEW_THRESHOLD: ${YOLO_REVIEW_THRESHOLD:-0.65}
+      YOLO_INFERENCE_DEVICE: cpu
+    ports:
+      # 只綁本機，外部一律經由 HTTPS 反向代理進來
+      - "127.0.0.1:${VISION_PORT:-8000}:8000"
+    volumes:
+      - vision-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 40s
+volumes:
+  vision-data:
