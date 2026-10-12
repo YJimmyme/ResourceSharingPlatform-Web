@@ -1,0 +1,1 @@
+{"name":"ai-recognition-lab","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test *.test.mjs"},"dependencies":{"sharp":"^0.34.0"}}

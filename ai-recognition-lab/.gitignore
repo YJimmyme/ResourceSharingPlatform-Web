@@ -1,0 +1,10 @@
+.venv-yolo/
+yolo-data/
+models/
+__pycache__/
+node_modules/
+.qa-yolo/
+
+.qa-single-practice/
+.qa-practice-smoke.py
+yolo-data-local/

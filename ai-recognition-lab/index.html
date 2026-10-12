@@ -1,0 +1,40 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>AI 入庫辨識測試</title>
+<style>body{font:17px system-ui;max-width:1000px;margin:35px auto;padding:0 20px;color:#183b40;background:#f6f8f8}label{display:block;margin-top:16px}input,textarea,select,button{font:inherit;padding:9px;box-sizing:border-box}input:not([type=file]):not([type=checkbox]),textarea{width:100%}textarea{height:125px;font:14px Consolas,monospace}button{margin:16px 8px 16px 0;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:16px}small{display:block;color:#52646a}img{max-height:240px;max-width:100%}</style>
+<h1>AI 智慧入庫：本機辨識測試</h1>
+<p><a href="/yolo">開啟 YOLO 本機辨識、圖片標註與專屬模型訓練 →</a></p>
+<p>同一批照片，比較原版與改善版。照片會送到 OpenAI；此工具不連 Supabase、不寫庫存。組合辨識最多呼叫4次付費 API。</p>
+<label>API Key（僅本次使用，不寫入報告或瀏覽器儲存）<input id="key" type="password" autocomplete="off"></label>
+<label>辨識目標<select id="goal"><option value="appearance">外觀品項＋可見數量（預設）</option><option value="full">完整入庫欄位（先前方式）</option></select></label><small>外觀模式只數可見獨立外包裝，不推算箱內數量；A/B保留原版規則供比較。</small>
+<label>模型<input id="model" value="gpt-4o-mini"></label>
+<label>基準圖片細節<select id="imageDetail"><option>low</option><option>auto</option><option>high</option></select></label>
+<label>照片<input id="photo" type="file" accept="image/jpeg,image/png,image/webp"></label><img id="preview" alt="照片預覽" hidden>
+<label>文字描述<input id="text" placeholder="測照片辨識時先留空，避免文字透露答案"></label>
+<label>測試目錄（請替換為你系統實際使用的目錄）<textarea id="catalog">[{"item_name":"泡麵","category":"食品","unit":"杯","stock_type":"HasExpiry"}]</textarea></label>
+<label>同義詞<textarea id="synonyms">[{"synonym":"來一客","standard_name":"泡麵"}]</textarea></label>
+<label>這張照片的正確答案（外觀模式只評品名與數量；同品項合併一筆）<textarea id="expected">[{"item_name":"泡麵","quantity":2}]</textarea></label>
+<small>以上資料只是範例，請先核對。可加 specification、expiration_date；不可讀取的效期填 null。品名需用標準名稱。</small>
+<label>測試版本<select id="mode"><option value="baseline">A 原版</option><option value="detail">B 圖片細節 high</option><option value="prompt">C 提示詞與目錄改善</option><option value="combined" selected>D 組合辨識（依下方選項）</option></select></label>
+<fieldset id="combo"><legend>組合辨識設定</legend>
+<label>物件辨識難度<select id="complexity"><option value="simple">簡易：單品、少量、包裝清楚</option><option value="complex">複雜：多品項、重疊、包裝小字</option></select></label>
+<small>由你選擇難度，作為模型選用準則。簡易使用基準圖片細節；複雜固定 high。以下各階段可單獨開關做比較。</small>
+<label>簡易辨識模型<input id="simpleModel" value="gpt-4o-mini"></label>
+<label>複雜辨識模型<input id="complexModel" value="gpt-4o-mini"></label>
+<small>請填入你帳號可用且支援圖片與此API的模型名稱。預設相同，方便先比較方法；需要混用時再修改。</small>
+<label><input type="checkbox" id="crop" checked> 自動定位＋裁切原圖局部（最多4區）</label>
+<label><input type="checkbox" id="ocr"> 額外讀取包裝文字（視覺模型讀字，非獨立OCR引擎）</label>
+<label>文字讀取模型<input id="textModel" placeholder="留空使用本次辨識模型"></label>
+<label><input type="checkbox" id="review" checked> 第二輪模型複核</label>
+<label>複核模型<input id="reviewModel" placeholder="留空使用本次辨識模型；也可指定另一模型"></label>
+<label>複核時機<select id="reviewPolicy"><option value="always">每次複核（先驗證效果）</option><option value="uncertain">僅未知數量、目錄外或模型信心偏低時</option></select></label>
+<small>「僅不確定時」為啟發式規則，可能漏掉模型自信但答錯的項目。</small>
+</fieldset>
+<button id="run">執行本次測試</button><button id="download" disabled>下載全部測試報告 JSON</button>
+<p id="status" role="status"></p><div id="crops"></div><pre id="result">尚未測試。請先上傳照片並填寫正確答案。</pre>
+<script>
+const $=id=>document.getElementById(id);const reports=[];let image=null;
+$('photo').onchange=async()=>{const f=$('photo').files[0];image=null;$('preview').hidden=true;if(!f)return;if(f.size>10*1024*1024){$('status').textContent='照片不可超過10MB';return;}image=await new Promise((resolve,reject)=>{const r=new FileReader;r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(f)});$('preview').src=image;$('preview').hidden=false;};
+$('run').onclick=async()=>{try{$('run').disabled=true;$('status').textContent='正在辨識；組合流程可能需要數分鐘，請保持此頁開啟…';const body={apiKey:$('key').value,model:$('model').value,imageDetail:$('imageDetail').value,image,imageName:$('photo').files[0]?.name||null,text:$('text').value,mode:$('mode').value,goal:$('goal').value,complexity:$('complexity').value,simpleModel:$('simpleModel').value,complexModel:$('complexModel').value,textModel:$('textModel').value,reviewModel:$('reviewModel').value,crop:$('crop').checked,ocr:$('ocr').checked,review:$('review').checked,reviewPolicy:$('reviewPolicy').value,catalog:JSON.parse($('catalog').value),synonyms:JSON.parse($('synonyms').value),expected:JSON.parse($('expected').value)};const r=await fetch('/recognize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.error);const {crops,...report}=data;report.crops=(crops||[]).map(({image,...rest})=>rest);reports.push(report);$('crops').replaceChildren();for(const c of crops||[]){const img=document.createElement('img');img.src=c.image;img.alt=c.label;const label=document.createElement('p');label.textContent=c.label;$('crops').append(label,img);}$('result').textContent=JSON.stringify(report,null,2);$('download').disabled=false;const s=data.score;$('status').textContent=`完成 ${reports.length} 次測試；本次 ${data.callCount} 次模型呼叫。品名召回率 ${(s.recall*100).toFixed(1)}%；品名精確率 ${(s.precision*100).toFixed(1)}%；全部已標註欄位正確 ${s.exact}/${s.expectedCount} 項。`;}catch(e){$('status').textContent=e.message;$('result').textContent=e.message;}finally{$('run').disabled=false;}};
+$('goal').onchange=()=>{const appearance=$('goal').value==='appearance';$('ocr').disabled=appearance;if(appearance)$('ocr').checked=false;};$('goal').onchange();
+$('mode').onchange=()=>{$('combo').disabled=$('mode').value!=='combined';};
+$('download').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(reports,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='AI辨識測試-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+</script></html>
