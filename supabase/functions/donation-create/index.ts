@@ -63,6 +63,10 @@ interface Body {
   donorName: string
   donorContact?: string
   remark?: string
+  donorAddress?: string
+  donorPrecinct?: string | null
+  donorDistrict?: string | null
+  donorIdentity?: string
 }
 
 serve(async (req) => {
@@ -88,6 +92,10 @@ serve(async (req) => {
       p_donor_contact: body.donorContact?.trim() || null,
       p_operator: operatorName,
       p_remark: body.remark?.trim() || null,
+      p_donor_address: body.donorAddress?.trim() || null,
+      p_donor_precinct: body.donorPrecinct || null,
+      p_donor_district: body.donorDistrict || null,
+      p_donor_identity: body.donorIdentity || null,
     })
 
     if (error) {

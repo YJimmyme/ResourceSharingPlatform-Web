@@ -65,16 +65,27 @@ interface BatchEntry {
   quantity: number
 }
 
+interface RecipientEntry {
+  name: string
+  contact?: string
+  precinct?: string
+  district?: string
+  identity?: string
+  items: BatchEntry[]
+}
+
 interface Body {
   locationId: number
-  recipientName: string
+  recipientName?: string
   recipientContact?: string
   remark?: string
-  // 批次專用
+  // 批次專用（單一領用人多品項）
   items?: BatchEntry[]
   recipientPrecinct?: string
   recipientDistrict?: string
   recipientIdentity?: string
+  // 多人專用（多位領用人各自的物資清單）
+  recipients?: RecipientEntry[]
   // 單筆專用
   supplyItemId?: number
   outboundQuantity?: number
@@ -89,19 +100,46 @@ serve(async (req) => {
     const ctx = await requireCaller(req)
     const body = (await req.json()) as Body
 
-    if (!body.recipientName?.trim()) {
-      throw new AuthError('請輸入領用人姓名', 400)
-    }
-
     assertLocationAccess(ctx, body.locationId)
 
     const operatorName = ctx.profile.display_name ?? ctx.profile.username
-    const isBatch = Array.isArray(body.items)
+    const isMulti = Array.isArray(body.recipients)
+    const isBatch = !isMulti && Array.isArray(body.items)
 
     let data: unknown
     let error: { message: string } | null
 
-    if (isBatch) {
+    if (isMulti) {
+      const recipients = body.recipients ?? []
+      if (recipients.length === 0) throw new AuthError('請至少加入一位領用人', 400)
+      for (const r of recipients) {
+        if (!r?.name?.trim()) throw new AuthError('每一位領用人都要填姓名', 400)
+        if (!r.district?.trim()) throw new AuthError(`「${r.name ?? ''}」請選擇所屬鄉鎮`, 400)
+        if (!r.identity || !VALID_IDENTITIES.includes(r.identity)) throw new AuthError(`「${r.name ?? ''}」請選擇身分別`, 400)
+        if (!Array.isArray(r.items) || r.items.length === 0) throw new AuthError(`「${r.name ?? ''}」至少要領一項物資`, 400)
+        for (const it of r.items) {
+          if (!it?.supplyItemId || !Number.isInteger(it.quantity) || it.quantity <= 0) {
+            throw new AuthError(`「${r.name ?? ''}」的領用清單有一列物資或數量不正確`, 400)
+          }
+        }
+      }
+      const res = await ctx.adminClient.rpc('outbound_create_multi', {
+        p_location_id: body.locationId,
+        p_recipients: recipients.map((r) => ({
+          name: r.name.trim(),
+          contact: r.contact?.trim() || null,
+          precinct: r.precinct?.trim() || null,
+          district: r.district?.trim() || null,
+          identity: r.identity || null,
+          items: r.items.map((it) => ({ supplyItemId: it.supplyItemId, quantity: it.quantity })),
+        })),
+        p_operator: operatorName,
+        p_remark: body.remark?.trim() || null,
+      })
+      data = res.data
+      error = res.error
+    } else if (isBatch) {
+      if (!body.recipientName?.trim()) throw new AuthError('請輸入領用人姓名', 400)
       const items = body.items ?? []
       if (items.length === 0) {
         throw new AuthError('請至少加入一項要出庫的物資', 400)
@@ -132,6 +170,7 @@ serve(async (req) => {
       data = res.data
       error = res.error
     } else {
+      if (!body.recipientName?.trim()) throw new AuthError('請輸入領用人姓名', 400)
       const res = await ctx.adminClient.rpc('outbound_create', {
         p_supply_item_id: body.supplyItemId,
         p_location_id: body.locationId,
@@ -153,7 +192,11 @@ serve(async (req) => {
       .invoke('line-notify', { body: { triggeredBy: 'outbound' } })
       .catch((e: unknown) => console.error('line-notify failed', e))
 
-    const message = isBatch ? `出庫完成，共 ${body.items?.length ?? 0} 項物資` : '出庫完成'
+    const message = isMulti
+      ? `領用完成，共 ${body.recipients?.length ?? 0} 位領用人`
+      : isBatch
+        ? `領用完成，共 ${body.items?.length ?? 0} 項物資`
+        : '領用完成'
 
     return new Response(JSON.stringify({ success: true, message, log: data }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
