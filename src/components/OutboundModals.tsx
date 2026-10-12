@@ -1,12 +1,12 @@
-// 物資出庫專用的四個彈出視窗。只有 SupplyOutbound.tsx 會 import，
+// 物資領用專用的四個彈出視窗。只有 SupplyOutbound.tsx 會 import，
 // 捐贈／報廢／轉移完全不受影響（那三頁仍然走 StockBatchPicker）。
 //
 //   建立頁：
-//   1) DistrictPickerModal     — 先選分局區，再選該分局負責的鄉鎮市
-//   2) OutboundItemPickerModal — 可出庫物資明細 + 當場輸入數量，加進批次清單
+//   1) DistrictPickerModal     — 依分區列出鄉鎮市，直接點選
+//   2) OutboundItemPickerModal — 可領用物資明細 + 當場輸入數量，加進批次清單
 //   3) OutboundConfirmModal    — 送出前的最後確認，列出整張領用單
 //   紀錄頁：
-//   4) OutboundCancelModal     — 取消單一品項的出庫，數量退回原批次
+//   4) OutboundCancelModal     — 取消單一品項的領用，數量退回原批次
 //
 // 版型沿用專案既有的「純 CSS Bootstrap modal」寫法（見 InventoryTypes.tsx、
 // AccountManagement.tsx）：不掛 bootstrap 的 JS，只靠 .modal.d-block + 自畫遮罩。
@@ -18,10 +18,9 @@ import { AllStockTypes, stockTypeDisplayName } from '../lib/enums'
 import type { SupplyItem } from '../types/db'
 
 // ============================================================================
-// 1) 所屬鄉鎮選擇：分局區 → 鄉鎮市
+// 1) 所屬鄉鎮選擇：依分區列出鄉鎮市
 // ============================================================================
 export function DistrictPickerModal({
-  currentPrecinct,
   currentDistrict,
   onCancel,
   onSelect,
@@ -31,56 +30,42 @@ export function DistrictPickerModal({
   onCancel: () => void
   onSelect: (precinct: string, district: string) => void
 }) {
-  // 預設展開目前已選的分局區；沒選過就等使用者自己點。
-  const [openPrecinct, setOpenPrecinct] = useState<string | null>(currentPrecinct)
-
   return (
     <div className="modal d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
       <div className="modal-dialog modal-lg modal-dialog-scrollable">
         <div className="modal-content">
           <div className="modal-header">
             <h5 className="modal-title">
-              <i className="bi bi-geo-alt" /> 選擇領用人所屬鄉鎮
+              <i className="bi bi-geo-alt" /> 選擇使用人所屬鄉鎮
             </h5>
             <button type="button" className="btn-close" onClick={onCancel} />
           </div>
           <div className="modal-body">
             <p className="text-muted small">
-              先點選分局區，再從該分局負責的鄉鎮市中選一個。範圍為雲林縣全部 20 個鄉鎮市。
+              直接點選鄉鎮市即可（依分區列出，範圍為雲林縣全部 20 個鄉鎮市）。
             </p>
-            {YunlinPrecincts.map((p) => {
-              const expanded = openPrecinct === p.name
-              return (
-                <div className="card mb-2" key={p.name}>
-                  <button
-                    type="button"
-                    className={`btn text-start w-100 d-flex justify-content-between align-items-center ${
-                      expanded ? 'btn-dark' : 'btn-outline-dark'
-                    }`}
-                    onClick={() => setOpenPrecinct(expanded ? null : p.name)}
-                  >
-                    <span>
-                      <i className="bi bi-building" /> {p.name}
-                    </span>
-                    <span className="badge bg-secondary">{p.townships.length} 個鄉鎮市</span>
-                  </button>
-                  {expanded && (
-                    <div className="card-body d-flex flex-wrap gap-2">
-                      {p.townships.map((t) => (
-                        <button
-                          key={t}
-                          type="button"
-                          className={`btn btn-sm ${currentDistrict === t ? 'btn-primary' : 'btn-outline-primary'}`}
-                          onClick={() => onSelect(p.name, t)}
-                        >
-                          {t}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+            {YunlinPrecincts.map((p) => (
+              <div className="card mb-2" key={p.name}>
+                <div className="card-header bg-light d-flex justify-content-between align-items-center py-2">
+                  <span>
+                    <i className="bi bi-building" /> {p.name}
+                  </span>
+                  <span className="badge bg-secondary">{p.townships.length} 個鄉鎮市</span>
                 </div>
-              )
-            })}
+                <div className="card-body d-flex flex-wrap gap-2">
+                  {p.townships.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      className={`btn btn-sm ${currentDistrict === t ? 'btn-primary' : 'btn-outline-primary'}`}
+                      onClick={() => onSelect(p.name, t)}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
           <div className="modal-footer">
             <button type="button" className="btn btn-secondary" onClick={onCancel}>
@@ -94,7 +79,7 @@ export function DistrictPickerModal({
 }
 
 // ============================================================================
-// 2) 批次出庫的物資挑選：明細清單 + 數量
+// 2) 批次領用的物資挑選：明細清單 + 數量
 // ============================================================================
 export function OutboundItemPickerModal({
   items,
@@ -102,6 +87,10 @@ export function OutboundItemPickerModal({
   remainingOf,
   onCancel,
   onAdd,
+  title = '加入要派送的物資',
+  quantityLabel = '領用數量',
+  availableLabel = '可領數量',
+  emptyText = '這個據點沒有符合條件的可領用物資',
 }: {
   /** 已由 useItemPicker 依「所選據點 + 有庫存」過濾過的物資 */
   items: SupplyItem[]
@@ -110,6 +99,11 @@ export function OutboundItemPickerModal({
   remainingOf: (item: SupplyItem) => number
   onCancel: () => void
   onAdd: (item: SupplyItem, quantity: number) => void
+  /** 標題／數量欄位／表頭／空清單文字可依情境覆寫（領用、轉移共用）。 */
+  title?: string
+  quantityLabel?: string
+  availableLabel?: string
+  emptyText?: string
 }) {
   const [keyword, setKeyword] = useState('')
   const [stockType, setStockType] = useState('')
@@ -150,7 +144,7 @@ export function OutboundItemPickerModal({
         <div className="modal-content">
           <div className="modal-header">
             <h5 className="modal-title">
-              <i className="bi bi-box-seam" /> 加入要派送的物資
+              <i className="bi bi-box-seam" /> {title}
             </h5>
             <button type="button" className="btn-close" onClick={onCancel} />
           </div>
@@ -194,7 +188,7 @@ export function OutboundItemPickerModal({
                     <th style={{ width: 56 }} />
                     <th>物資</th>
                     <th className="col-min">規格／批次</th>
-                    <th className="col-min">可領數量</th>
+                    <th className="col-min">{availableLabel}</th>
                     <th className="col-min">效期</th>
                     <th />
                   </tr>
@@ -209,7 +203,7 @@ export function OutboundItemPickerModal({
                   ) : rows.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="text-center text-muted py-4">
-                        這個據點沒有符合條件的可出庫物資
+                        {emptyText}
                       </td>
                     </tr>
                   ) : (
@@ -284,7 +278,7 @@ export function OutboundItemPickerModal({
                   </div>
                   <div className="row g-2 align-items-end">
                     <div className="col-sm-4">
-                      <label className="form-label mb-1">領用數量 *</label>
+                      <label className="form-label mb-1">{quantityLabel} *</label>
                       <input
                         className="form-control"
                         type="number"
@@ -324,7 +318,7 @@ export function OutboundItemPickerModal({
 }
 
 // ============================================================================
-// 3) 送出前的最後確認：把整張領用單攤出來給人看過再真的出庫
+// 3) 送出前的最後確認：把整張領用單攤出來給人看過再真的領用
 //
 // 這一步刻意不做任何驗證 —— 頁面在開這個視窗之前就已經驗過了，
 // 這裡只負責「呈現 + 再問一次」，避免兩邊各有一份規則而漸漸不一致。
@@ -364,7 +358,7 @@ export function OutboundConfirmModal({
         <div className="modal-content">
           <div className="modal-header">
             <h5 className="modal-title">
-              <i className="bi bi-clipboard-check" /> 確認本次出庫內容
+              <i className="bi bi-clipboard-check" /> 確認本次領用內容
             </h5>
             <button type="button" className="btn-close" disabled={submitting} onClick={onCancel} />
           </div>
@@ -374,7 +368,7 @@ export function OutboundConfirmModal({
               <div className="card-body">
                 <div className="row g-2">
                   <div className="col-sm-6">
-                    <div className="text-muted small">領用人</div>
+                    <div className="text-muted small">使用人</div>
                     <div className="fw-bold">{recipientName}</div>
                   </div>
                   <div className="col-sm-6">
@@ -422,8 +416,8 @@ export function OutboundConfirmModal({
                     <th>物資</th>
                     <th className="col-min">規格／批次</th>
                     <th className="col-min">效期</th>
-                    <th className="col-min text-end">出庫數量</th>
-                    <th className="col-min text-end">出庫後剩餘</th>
+                    <th className="col-min text-end">領用數量</th>
+                    <th className="col-min text-end">領用後剩餘</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -465,7 +459,7 @@ export function OutboundConfirmModal({
             </div>
 
             <div className="alert alert-warning mt-3 mb-0">
-              <i className="bi bi-exclamation-triangle" /> 按下「確定出庫」後會立刻扣除庫存，且
+              <i className="bi bi-exclamation-triangle" /> 按下「確定領用」後會立刻扣除庫存，且
               <strong>無法直接復原</strong>。請再確認一次上面的品項與數量。
             </div>
           </div>
@@ -475,7 +469,7 @@ export function OutboundConfirmModal({
               <i className="bi bi-pencil" /> 返回修改
             </button>
             <button type="button" className="btn btn-primary" disabled={submitting} onClick={onConfirm}>
-              <i className="bi bi-check-circle" /> {submitting ? '處理中…' : '確定出庫'}
+              <i className="bi bi-check-circle" /> {submitting ? '處理中…' : '確定領用'}
             </button>
           </div>
         </div>
@@ -485,7 +479,7 @@ export function OutboundConfirmModal({
 }
 
 // ============================================================================
-// 4) 取消出庫的確認視窗（出庫紀錄頁用）
+// 4) 取消領用的確認視窗（領用紀錄頁用）
 //
 // 一列 supply_outbound_log 就是一項物資，所以這裡取消的一定是「單一品項」；
 // 同一批次的其他品項不受影響，視窗文案也要講清楚這件事。
@@ -508,7 +502,7 @@ export function OutboundCancelModal({
   recipientName: string
   locationName: string
   outboundTime: string
-  /** 同一批次還有幾項（不含這一項）；0 代表單筆出庫或整批只有這一項 */
+  /** 同一批次還有幾項（不含這一項）；0 代表單筆領用或整批只有這一項 */
   sameBatchCount: number
   submitting: boolean
   onCancel: () => void
@@ -522,7 +516,7 @@ export function OutboundCancelModal({
         <div className="modal-content">
           <div className="modal-header">
             <h5 className="modal-title">
-              <i className="bi bi-arrow-counterclockwise" /> 取消這筆出庫
+              <i className="bi bi-arrow-counterclockwise" /> 取消這筆領用
             </h5>
             <button type="button" className="btn-close" disabled={submitting} onClick={onCancel} />
           </div>
@@ -544,11 +538,11 @@ export function OutboundCancelModal({
                     <div>{locationName}</div>
                   </div>
                   <div className="col-6">
-                    <div className="text-muted small">領用人</div>
+                    <div className="text-muted small">使用人</div>
                     <div>{recipientName}</div>
                   </div>
                   <div className="col-6">
-                    <div className="text-muted small">原出庫時間</div>
+                    <div className="text-muted small">原領用時間</div>
                     <div>{outboundTime}</div>
                   </div>
                 </div>
@@ -561,7 +555,7 @@ export function OutboundCancelModal({
                 className="form-control"
                 rows={2}
                 maxLength={200}
-                placeholder="例如：登錄錯誤、領用人未到"
+                placeholder="例如：登錄錯誤、使用人未到"
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
               />
@@ -569,7 +563,7 @@ export function OutboundCancelModal({
 
             {sameBatchCount > 0 && (
               <div className="alert alert-info mb-2">
-                <i className="bi bi-info-circle" /> 這筆屬於一次批次出庫，同一批還有其他{' '}
+                <i className="bi bi-info-circle" /> 這筆屬於一次批次領用，同一批還有其他{' '}
                 <strong>{sameBatchCount}</strong> 項物資。
                 <strong>只有這一項會被取消</strong>，其他項目要另外分別取消。
               </div>
@@ -577,7 +571,7 @@ export function OutboundCancelModal({
 
             <div className="alert alert-warning mb-0">
               <i className="bi bi-exclamation-triangle" /> 取消後數量會立刻退回原本的庫存批次，
-              出庫紀錄會保留並標記為「已取消」（不會被刪除）。
+              領用紀錄會保留並標記為「已取消」（不會被刪除）。
             </div>
           </div>
 
@@ -586,7 +580,7 @@ export function OutboundCancelModal({
               先不要
             </button>
             <button type="button" className="btn btn-danger" disabled={submitting} onClick={() => onConfirm(reason)}>
-              <i className="bi bi-arrow-counterclockwise" /> {submitting ? '處理中…' : '確定取消出庫'}
+              <i className="bi bi-arrow-counterclockwise" /> {submitting ? '處理中…' : '確定取消領用'}
             </button>
           </div>
         </div>

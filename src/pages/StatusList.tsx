@@ -1,7 +1,7 @@
-// 戰情總覽色塊點擊後跳來的「狀態清單」頁（分工單 p.2 跳頁 + p.4 共用版面 + p.5/6/7 舉手）。
+// 物資總覽色塊點擊後跳來的「狀態清單」頁（分工單 p.2 跳頁 + p.4 共用版面 + p.5/6/7 舉手）。
 // 舉手邏輯（依需求修正）：需求方＝「我的據點」（自動、不用選），要選的是「哪個據點有貨」——
 // 來源下拉只列出實際有此品項庫存的其他據點並顯示現有數量。來源據點之後透過物資轉移補貨。
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabaseClient'
 import { useAuth } from '../hooks/useAuth'
@@ -9,8 +9,11 @@ import { locationColorStyle } from '../lib/colors'
 import { statusColorMap, type DashboardStatusKey } from '../lib/statusColors'
 import { fetchLowStock, isItemLowStock, emptyLowStock, type LowStockData } from '../lib/lowStock'
 import { itemPhotoUrl } from '../lib/imageUpload'
-import { stockTypeDisplayName, stockTypeBadgeClass } from '../lib/enums'
+import { stockTypeDisplayName, stockTypeBadgeClass, Roles } from '../lib/enums'
+import { logActivity } from '../lib/activityLog'
+import { EXPIRY_WARNING_DAYS } from '../lib/stockBatch'
 import { FlashMessage } from '../components/FlashMessage'
+import { RaiseRequestModal } from '../components/RaiseRequestModal'
 import type { SupplyItem, SupplyLocation } from '../types/db'
 
 interface Row {
@@ -34,6 +37,7 @@ interface GlobalLowRow {
   specification: string | null
   unit: string
   global_safety_stock: number
+  global_threshold: number
   total_quantity: number
 }
 
@@ -53,14 +57,12 @@ export function StatusList() {
   const [keyword, setKeyword] = useState('')
   const [loading, setLoading] = useState(true)
 
-  // 舉手彈窗
+  // 舉手彈窗（表單邏輯已抽到 components/RaiseRequestModal）
   const [raiseRow, setRaiseRow] = useState<Row | null>(null)
-  const [srcLocationId, setSrcLocationId] = useState('')
-  const [reqLocationId, setReqLocationId] = useState('') // 只有無法自動判斷時（管理員／總量不足）才需手選
-  const [reqQuantity, setReqQuantity] = useState('1')
-  const [reqNote, setReqNote] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // 申請報廢彈窗（填原因）
+  const [disposalRow, setDisposalRow] = useState<Row | null>(null)
+  const [disposalReason, setDisposalReason] = useState('已過期')
+  const [disposalSaving, setDisposalSaving] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -68,7 +70,7 @@ export function StatusList() {
       const [itemsRes, locRes, globalRes, low] = await Promise.all([
         supabase.from('supply_item').select('*').eq('is_active', true).order('expiration_date', { ascending: true, nullsFirst: false }),
         supabase.from('supply_location').select('*').eq('is_active', true).order('id'),
-        supabase.from('global_low_stock_view').select('category, item_name, specification, unit, global_safety_stock, total_quantity'),
+        supabase.from('global_low_stock_view').select('category, item_name, specification, unit, global_safety_stock, global_threshold, total_quantity'),
         fetchLowStock(),
       ])
       setItems((itemsRes.data ?? []) as SupplyItem[])
@@ -86,7 +88,7 @@ export function StatusList() {
   }
 
   const today = new Date().toISOString().slice(0, 10)
-  const in30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+  const in30 = new Date(Date.now() + EXPIRY_WARNING_DAYS * 86400000).toISOString().slice(0, 10)
 
   const rows = useMemo<Row[]>(() => {
     if (!isValidStatus(status)) return []
@@ -103,13 +105,23 @@ export function StatusList() {
         locationId: null,
         quantity: g.total_quantity,
         expiration: null,
-        note: `總量安全門檻 ${g.global_safety_stock} ${g.unit}（請啟動募資）`,
+        note: `募資觸發點 ${Math.max(0, g.global_threshold - g.global_safety_stock)} ${g.unit}（門檻 ${g.global_threshold} − 安全 ${g.global_safety_stock}，請啟動募資）`,
       }))
     }
+    // 已過期：幫主/小幫手只看自己據點的（總管不限）。
+    const expiredOwnOnly = profile?.role_name !== Roles.Admin
+    const myLoc = profile?.location_id ?? null
+    // 小幫手：所有狀態清單一律只看自己據點。
+    const isSocialWorker = profile?.role_name === Roles.SocialWorker
     const picked = items.filter((it) => {
+      if (isSocialWorker && it.location_id !== myLoc) return false
       if (status === 'locationLowStock') return isItemLowStock(it, lowStock)
       if (status === 'expiringSoon') return it.expiration_date != null && it.expiration_date >= today && it.expiration_date <= in30
-      if (status === 'expired') return it.expiration_date != null && it.expiration_date < today
+      if (status === 'expired') {
+        if (it.expiration_date == null || it.expiration_date >= today) return false
+        if (expiredOwnOnly && it.location_id !== myLoc) return false
+        return true
+      }
       return false
     })
     return picked.map((it) => ({
@@ -126,7 +138,7 @@ export function StatusList() {
       expiration: it.expiration_date,
       note: null,
     }))
-  }, [status, items, globalLow, lowStock, today, in30])
+  }, [status, items, globalLow, lowStock, today, in30, profile])
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase()
@@ -134,68 +146,40 @@ export function StatusList() {
     return rows.filter((r) => `${r.category} ${r.item_name} ${r.specification ?? ''}`.toLowerCase().includes(k))
   }, [rows, keyword])
 
-  // 需求方＝登入帳號的據點（固定，不隨品項變）。管理員無據點時才需手選。
-  const myLocId: number | null = profile?.location_id ?? null
-  // 來源＝物資所在的據點（這列的據點，自動帶入）；總量不足（無所在據點）才需挑選。
-  const isGlobalRow = raiseRow != null && raiseRow.locationId == null
-  // 物資就在自己據點時無需向自己求援。
-  const sameLocation = raiseRow != null && raiseRow.locationId != null && raiseRow.locationId === myLocId
+  const isAdmin = profile?.role_name === Roles.Admin
+  const isCadre = profile?.role_name === Roles.Cadre
+  // 舉手／申請報廢是「送需求給總管審核」的請求功能（非直接動別據點庫存），
+  // 依權限設計：總管與幫主可用，小幫手無。看得到全部據點，但直接操作（如物資
+  // 明細「調整」）另在各頁鎖自己據點。
+  const isAdminOrCadre = isAdmin || isCadre
 
-  // 總量不足時：可挑「有此品項庫存」的其他據點（顯示現有數量）。
-  const sourceOptions = useMemo(() => {
-    if (!raiseRow) return [] as { locId: number; qty: number }[]
-    const byLoc = new Map<number, number>()
-    for (const it of items) {
-      if (
-        it.category === raiseRow.category &&
-        it.item_name === raiseRow.item_name &&
-        (it.specification ?? '') === (raiseRow.specification ?? '') &&
-        it.quantity > 0 &&
-        it.location_id !== myLocId
-      ) {
-        byLoc.set(it.location_id, (byLoc.get(it.location_id) ?? 0) + it.quantity)
-      }
-    }
-    return [...byLoc.entries()].map(([locId, qty]) => ({ locId, qty })).sort((a, b) => b.qty - a.qty)
-  }, [raiseRow, items, myLocId])
-
-  function openRaise(row: Row) {
-    setRaiseRow(row)
-    setSrcLocationId('')
-    setReqLocationId(profile?.location_id ? String(profile.location_id) : '')
-    setReqQuantity('1')
-    setReqNote('')
-    setError(null)
-  }
-
-  async function submitRaise(e: FormEvent) {
-    e.preventDefault()
-    if (!raiseRow) return
-    setError(null)
-    const reqLoc = myLocId ?? (reqLocationId ? Number(reqLocationId) : null)
-    const srcLoc = isGlobalRow ? (srcLocationId ? Number(srcLocationId) : null) : raiseRow.locationId
-    if (!reqLoc) return setError('無法判斷你的據點，請先選擇')
-    if (!srcLoc) return setError('請選擇來源據點')
-    if (reqLoc === srcLoc) return setError('此物資就在你的據點，無需向自己調貨')
-    const qty = Number(reqQuantity)
-    if (!Number.isInteger(qty) || qty <= 0) return setError('數量必須是大於 0 的整數')
-
-    setSaving(true)
+  // 幫主對已過期的「向總管申請報廢」：沿用舉手（supply_request），type=disposal，指定批次。
+  // 原因改用彈窗填寫（與其他操作一致），總管在「待處理需求 → 詳細」會看到。
+  async function submitDisposalRequest() {
+    const row = disposalRow
+    if (!row || row.id == null || row.locationId == null) return
+    setDisposalSaving(true)
+    const note = disposalReason.trim() || '已過期，申請報廢'
     const { error: insErr } = await supabase.from('supply_request').insert({
-      category: raiseRow.category,
-      item_name: raiseRow.item_name,
-      specification: raiseRow.specification,
-      requesting_location_id: reqLoc,
-      source_location_id: srcLoc,
-      quantity: qty,
+      request_type: 'disposal',
+      supply_item_id: row.id,
+      category: row.category,
+      item_name: row.item_name,
+      specification: row.specification,
+      requesting_location_id: row.locationId,
+      quantity: row.quantity ?? 0,
       requested_by: profile?.display_name ?? profile?.username ?? null,
-      note: reqNote.trim() || null,
+      note,
       status: 'Open',
     })
-    setSaving(false)
-    if (insErr) return setError(insErr.message)
-    setRaiseRow(null)
-    navigate('/', { state: { flash: `已提出需求：${raiseRow.item_name} ${qty} ${raiseRow.unit ?? ''}` } })
+    setDisposalSaving(false)
+    if (insErr) {
+      alert(insErr.message)
+      return
+    }
+    void logActivity({ action: 'request_disposal', category: '申請', targetTable: 'supply_request', targetId: row.id, locationId: row.locationId, summary: `申請報廢「${row.item_name}」${row.quantity ?? ''} ${row.unit ?? ''}（已過期）` })
+    setDisposalRow(null)
+    navigate('/', { state: { flash: `已向總管申請報廢：${row.item_name}` } })
   }
 
   if (!isValidStatus(status)) {
@@ -203,7 +187,7 @@ export function StatusList() {
       <div className="container-fluid mt-4">
         <div className="alert alert-warning">未知的狀態頁面。</div>
         <Link className="btn btn-secondary" to="/">
-          返回戰情總覽
+          返回物資總覽
         </Link>
       </div>
     )
@@ -221,7 +205,7 @@ export function StatusList() {
           {c.label}
         </h2>
         <Link className="btn btn-outline-secondary" to="/">
-          <i className="bi bi-arrow-left" /> 返回戰情總覽
+          <i className="bi bi-arrow-left" /> 返回物資總覽
         </Link>
       </div>
       <FlashMessage />
@@ -260,7 +244,28 @@ export function StatusList() {
                       <td>{r.quantity ?? '—'} {r.unit ?? ''}</td>
                       <td>{r.locationId == null ? <span className="badge bg-secondary">全系統</span> : <span className="badge" style={locationColorStyle(r.locationId)}>{locationName(r.locationId)}</span>}</td>
                       <td>{r.expiration ?? (r.stock_type ? <span className={`badge ${stockTypeBadgeClass(r.stock_type)}`}>{stockTypeDisplayName(r.stock_type)}</span> : r.note ?? '—')}</td>
-                      <td className="text-center"><button className="btn btn-sm btn-primary" onClick={() => openRaise(r)}><i className="bi bi-hand-index-thumb" /> 舉手</button></td>
+                      <td className="text-center">
+                        {status === 'expired' ? (
+                          // 已過期：總管直接報廢（不限據點）；幫主只能對「自己據點」申請報廢；其餘無動作。
+                          isAdmin && r.id != null ? (
+                            <Link className="btn btn-sm btn-dark" to={`/disposals/create?supplyItemId=${r.id}`}>
+                              <i className="bi bi-trash3" /> 報廢
+                            </Link>
+                          ) : isCadre && r.id != null && r.locationId === profile?.location_id ? (
+                            <button className="btn btn-sm btn-primary" onClick={() => { setDisposalRow(r); setDisposalReason('已過期') }}>
+                              <i className="bi bi-hand-index-thumb" /> 舉手
+                            </button>
+                          ) : (
+                            <span className="text-muted small">—</span>
+                          )
+                        ) : isAdminOrCadre ? (
+                          <button className="btn btn-sm btn-primary" onClick={() => setRaiseRow(r)}>
+                            <i className="bi bi-hand-index-thumb" /> 舉手
+                          </button>
+                        ) : (
+                          <span className="text-muted small">—</span>
+                        )}
+                      </td>
                     </tr>
                   )
                 })}
@@ -271,88 +276,52 @@ export function StatusList() {
         </div>
       </div>
 
-      {/* 舉手：提出缺料需求 */}
+      {/* 舉手：提出缺料需求（表單在共用元件） */}
       {raiseRow && (
+        <RaiseRequestModal
+          target={{
+            category: raiseRow.category,
+            item_name: raiseRow.item_name,
+            specification: raiseRow.specification,
+            unit: raiseRow.unit,
+            locationId: raiseRow.locationId,
+            quantity: raiseRow.quantity,
+          }}
+          locations={locations}
+          items={items}
+          onClose={() => setRaiseRow(null)}
+          onDone={(flash) => {
+            setRaiseRow(null)
+            navigate('/', { state: { flash } })
+          }}
+        />
+      )}
+
+      {/* 申請報廢：填寫原因 */}
+      {disposalRow && (
         <div className="modal d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content">
-              <form onSubmit={submitRaise}>
-                <div className="modal-header">
-                  <h5 className="modal-title">
-                    <i className="bi bi-hand-index-thumb" /> 提出缺料需求
-                  </h5>
-                  <button type="button" className="btn-close" onClick={() => setRaiseRow(null)} />
+              <div className="modal-header">
+                <h5 className="modal-title"><i className="bi bi-trash3" /> 向總管申請報廢</h5>
+                <button type="button" className="btn-close" onClick={() => setDisposalRow(null)} />
+              </div>
+              <div className="modal-body">
+                <div className="alert alert-light border small mb-3">
+                  品項：<strong>{disposalRow.item_name}</strong>
+                  {disposalRow.specification ? `／${disposalRow.specification}` : ''}（{disposalRow.category}）
+                  ，數量 {disposalRow.quantity ?? ''} {disposalRow.unit ?? ''}（已過期）
                 </div>
-                <div className="modal-body">
-                  {error && <div className="alert alert-danger">{error}</div>}
-                  <div className="alert alert-light border small mb-3">
-                    品項：<strong>{raiseRow.item_name}</strong>
-                    {raiseRow.specification ? `／${raiseRow.specification}` : ''}（{raiseRow.category}）
-                  </div>
-
-                  <div className="mb-3">
-                    <label className="form-label">需求據點（你的據點）</label>
-                    {myLocId != null ? (
-                      <input className="form-control" disabled value={locationName(myLocId)} />
-                    ) : (
-                      <select className="form-select" required value={reqLocationId} onChange={(e) => setReqLocationId(e.target.value)}>
-                        <option value="">請選擇你的據點</option>
-                        {locations.map((l) => (
-                          <option key={l.id} value={l.id}>
-                            {l.location_name}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-
-                  <div className="mb-3">
-                    <label className="form-label">來源（物資所在）據點 *</label>
-                    {isGlobalRow ? (
-                      <>
-                        <select className="form-select" required value={srcLocationId} onChange={(e) => setSrcLocationId(e.target.value)}>
-                          <option value="">請選擇有庫存的據點</option>
-                          {sourceOptions.map((s) => (
-                            <option key={s.locId} value={s.locId}>
-                              {locationName(s.locId)}（現有 {s.qty} {raiseRow.unit ?? ''}）
-                            </option>
-                          ))}
-                        </select>
-                        {sourceOptions.length === 0 && <div className="form-text text-danger">目前其他據點都沒有此品項的庫存。</div>}
-                      </>
-                    ) : (
-                      <input
-                        className="form-control"
-                        disabled
-                        value={`${locationName(raiseRow.locationId)}（現有 ${raiseRow.quantity ?? '?'} ${raiseRow.unit ?? ''}）`}
-                      />
-                    )}
-                  </div>
-
-                  {sameLocation && <div className="alert alert-warning py-2 small mb-3">此物資就在你的據點，無需向自己調貨。</div>}
-
-                  <div className="mb-3">
-                    <label className="form-label">需求數量 *</label>
-                    <input className="form-control" type="number" min={1} required value={reqQuantity} onChange={(e) => setReqQuantity(e.target.value)} />
-                  </div>
-                  <div className="mb-3">
-                    <label className="form-label">備註</label>
-                    <textarea className="form-control" rows={2} value={reqNote} onChange={(e) => setReqNote(e.target.value)} />
-                  </div>
-                </div>
-                <div className="modal-footer">
-                  <button type="button" className="btn btn-secondary" onClick={() => setRaiseRow(null)}>
-                    取消
-                  </button>
-                  <button
-                    type="submit"
-                    className="btn btn-primary"
-                    disabled={saving || sameLocation || (isGlobalRow && sourceOptions.length === 0)}
-                  >
-                    {saving ? '送出中…' : '送出需求'}
-                  </button>
-                </div>
-              </form>
+                <label className="form-label">報廢原因 *</label>
+                <textarea className="form-control" rows={3} value={disposalReason} onChange={(e) => setDisposalReason(e.target.value)} placeholder="請填寫報廢原因，總管審核時會看到" />
+                <div className="form-text">送出後會成為一筆待總管審核的報廢申請。</div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={() => setDisposalRow(null)}>取消</button>
+                <button type="button" className="btn btn-primary" disabled={disposalSaving || !disposalReason.trim()} onClick={() => void submitDisposalRequest()}>
+                  {disposalSaving ? '送出中…' : '送出申請'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

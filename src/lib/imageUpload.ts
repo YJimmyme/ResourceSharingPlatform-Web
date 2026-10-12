@@ -143,6 +143,30 @@ export async function attachAiPhotoToItem(
   }
 }
 
+// AI 智慧入庫「一張照片多筆品項」：把同一張 ai-stockin 照片複製給每一筆
+// 確認後的 supply_item（各自一份 items/ 副本），最後才刪除來源，避免像
+// attachAiPhotoToItem 那樣第一筆就把來源刪掉、其餘品項拿不到照片。
+export async function attachSharedAiPhoto(
+  aiStockinPath: string | null | undefined,
+  items: { id: number; quantity: number }[]
+): Promise<void> {
+  if (!aiStockinPath || !items.length) return
+  try {
+    const { data: blob } = await supabase.storage.from('ai-stockin').download(aiStockinPath)
+    if (!blob) return
+    const ext = aiStockinPath.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    for (const it of items) {
+      const key = `ai${it.id}-${it.quantity}-${dateStr}-001.${ext}`
+      const { error } = await supabase.storage.from('items').upload(key, blob, { contentType: blob.type || 'image/jpeg', upsert: false })
+      if (!error) await supabase.from('supply_item').update({ image_path: key }).eq('id', it.id)
+    }
+    await supabase.storage.from('ai-stockin').remove([aiStockinPath])
+  } catch {
+    /* 照片搬移失敗不影響入庫 */
+  }
+}
+
 // 編輯物資時替換照片：直接上傳到 items，鍵維持 itemPhotoDownloadName 可解析的
 // 格式（item{id}-{數量}-{日期}-{隨機序}.副檔名），隨機序避免同一天同物資重傳撞名。
 export async function uploadReplacementPhoto(

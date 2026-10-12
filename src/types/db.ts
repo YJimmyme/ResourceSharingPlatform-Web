@@ -11,6 +11,7 @@ export interface Profile {
   role_name: Role
   location_id: number | null
   is_active: boolean
+  password_changed_at: string | null
   created_at: string
   updated_at: string | null
 }
@@ -36,6 +37,7 @@ export interface InventoryItemDefinition {
   global_safety_stock: number
   stock_type: string
   is_active: boolean
+  sort_order: number
   created_at: string
   updated_at: string | null
 }
@@ -44,7 +46,8 @@ export interface InventoryItemVariant {
   id: number
   inventory_item_definition_id: number
   specification: string | null
-  global_safety_stock: number
+  global_safety_stock: number // 安全庫存量（保留量）
+  global_threshold: number // 募資門檻；當前總庫存 < 門檻 − 安全庫存量 時列為總量不足／啟動募資
   is_active: boolean
   created_at: string
   updated_at: string | null
@@ -69,7 +72,7 @@ export interface SupplyOutboundLog {
   operator: string | null
   outbound_time: string
   remark: string | null
-  // 批次出庫與領用人資料擴充；既有單筆紀錄可為 null。
+  // 批次出庫與使用人資料擴充；既有單筆紀錄可為 null。
   batch_id: string | null
   recipient_precinct: string | null
   recipient_district: string | null
@@ -90,6 +93,24 @@ export interface SupplyDonationLog {
   donor_contact: string | null
   operator: string | null
   donation_time: string
+  remark: string | null
+}
+
+// donation_source_view：物資捐贈 + 物資入庫(有捐贈人) 的統一來源。
+export interface DonationSource {
+  source_type: 'donation' | 'stock_in'
+  id: number
+  supply_item_id: number
+  location_id: number
+  donor_name: string
+  donor_contact: string
+  donor_address: string | null
+  donor_precinct: string | null
+  donor_district: string | null
+  donor_identity: string | null
+  quantity: number
+  source_time: string
+  operator: string | null
   remark: string | null
 }
 
@@ -154,6 +175,8 @@ export interface SupplyRequest {
   source_location_id: number | null
   quantity: number
   status: string // Open / Fulfilled / Cancelled
+  request_type: 'supply' | 'disposal' // supply=缺料舉手；disposal=申請報廢
+  supply_item_id: number | null // 報廢申請指定的批次
   requested_by: string | null
   note: string | null
   fulfilled_transfer_batch_id: string | null
@@ -176,6 +199,8 @@ export interface SupplyItem {
   safety_stock: number
   remark: string | null
   is_active: boolean
+  created_by: string | null // 建立此批次的操作人（入庫時寫入）
+  updated_by: string | null // 最後修改此批次的操作人（編輯時寫入）
   created_at: string
   updated_at: string | null
 }

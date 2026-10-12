@@ -2,6 +2,7 @@
 // 據點 + 分類快切 + 種類／名稱／規格批次三層連動 + 已選批次預覽卡。
 // 三頁的差異只剩各自的數量/對象欄位與右欄說明，那些留在各自的頁面裡。
 // （抽出的理由跟 SupplyItemForm 一樣：同一份實作，不要三份各自演化。）
+import { useState } from 'react'
 import type { useItemPicker } from '../hooks/useItemPicker'
 import { expiryAlert, batchLabel } from '../lib/stockBatch'
 import { itemPhotoUrl } from '../lib/imageUpload'
@@ -15,22 +16,36 @@ export function ExpiringItemsPanel({
   title,
   actionLabel,
   onPick,
+  defaultCollapsed = false,
 }: {
   items: SupplyItem[]
   locations: SupplyLocation[]
   title: string
   actionLabel: string
   onPick: (item: SupplyItem) => void
+  /** 預設收合（資料多時避免佔滿畫面，使用者要看再點開）。 */
+  defaultCollapsed?: boolean
 }) {
+  const [open, setOpen] = useState(!defaultCollapsed)
   if (items.length === 0) return null
   const locationName = (id: number) => locations.find((l) => l.id === id)?.location_name ?? `#${id}`
 
   return (
     <div className="card border-warning shadow-sm mb-4">
-      <div className="card-header bg-warning-subtle text-dark">
-        <i className="bi bi-exclamation-triangle-fill" /> {title}
-      </div>
-      <div className="table-responsive">
+      <button
+        type="button"
+        className="card-header bg-warning-subtle text-dark d-flex justify-content-between align-items-center w-100 border-0"
+        style={{ cursor: 'pointer' }}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span>
+          <i className="bi bi-exclamation-triangle-fill" /> {title}
+          <span className="badge bg-warning text-dark ms-2">{items.length}</span>
+        </span>
+        <i className={`bi ${open ? 'bi-chevron-up' : 'bi-chevron-down'}`} />
+      </button>
+      <div className="table-responsive" style={{ display: open ? undefined : 'none' }}>
         <table className="table table-sm table-hover align-middle mb-0">
           <thead>
             <tr>

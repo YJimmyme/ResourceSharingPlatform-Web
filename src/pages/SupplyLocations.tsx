@@ -3,6 +3,7 @@
 // needed, per migration plan §三.
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { logActivity } from '../lib/activityLog'
 import type { SupplyLocation } from '../types/db'
 import { useAuth } from '../hooks/useAuth'
 import { Roles } from '../lib/enums'
@@ -128,6 +129,7 @@ export function SupplyLocations() {
       setError(result.error.message)
       return
     }
+    void logActivity({ action: form.id ? 'location_update' : 'location_create', category: '資料維護', targetTable: 'supply_location', targetId: form.id || null, summary: `${form.id ? '修改' : '新增'}據點「${form.location_name}」` })
     setShowForm(false)
     void load()
   }
@@ -142,6 +144,7 @@ export function SupplyLocations() {
       setError(error.message)
       return
     }
+    void logActivity({ action: 'location_deactivate', category: '資料維護', targetTable: 'supply_location', targetId: loc.id, summary: `停用據點「${loc.location_name}」` })
     void load()
   }
 

@@ -1,4 +1,4 @@
-// 戰情總覽四種狀態的統一配色（分工單 p.9「色塊改色」）。
+// 物資總覽四種狀態的統一配色（分工單 p.9「色塊改色」）。
 // 抽成單一來源，Dashboard 的色塊、篩選元件（p.3）與共用狀態版面（p.4）都引用這裡，
 // 之後要改色只改一處。
 //   藍   據點低庫存 (locationLowStock)
@@ -16,11 +16,12 @@ export interface StatusColor {
   icon: string // bootstrap-icons class
 }
 
+// 配色比照使用者附件（淺色系色塊 + 深色文字，四色皆用黑字）。
 export const statusColorMap: Record<DashboardStatusKey, StatusColor> = {
-  locationLowStock: { label: '據點低庫存', bg: '#0d6efd', text: '#ffffff', icon: 'bi-exclamation-triangle-fill' }, // 藍
-  globalLowStock: { label: '總量不足／啟動募資', bg: '#dc3545', text: '#ffffff', icon: 'bi-globe' }, // 紅
-  expiringSoon: { label: '即將過期', bg: '#ffc107', text: '#212529', icon: 'bi-clock-fill' }, // 黃
-  expired: { label: '已過期', bg: '#495057', text: '#ffffff', icon: 'bi-x-circle-fill' }, // 鐵灰
+  locationLowStock: { label: '據點低庫存', bg: '#4FC3F7', text: '#212529', icon: 'bi-exclamation-triangle-fill' }, // 天藍
+  globalLowStock: { label: '總量不足／啟動募資', bg: '#F58787', text: '#212529', icon: 'bi-globe' }, // 珊瑚紅
+  expiringSoon: { label: '即將過期', bg: '#FBC02D', text: '#212529', icon: 'bi-clock-fill' }, // 金黃
+  expired: { label: '已過期', bg: '#C4C4C4', text: '#212529', icon: 'bi-x-circle-fill' }, // 淺灰
 }
 
 export const AllDashboardStatuses: DashboardStatusKey[] = ['locationLowStock', 'globalLowStock', 'expiringSoon', 'expired']

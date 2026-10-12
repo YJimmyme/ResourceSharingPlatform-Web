@@ -3,16 +3,20 @@
 // 已過期批次時會自動把原因設為「過期」。
 // 寫入走 disposal-create Edge Function；Index 只是一個受 RLS 限縮的 SELECT。
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabaseClient'
 import { useAuth } from '../hooks/useAuth'
 import { useItemPicker } from '../hooks/useItemPicker'
 import { functionErrorMessage } from '../lib/functionError'
+import { logActivity } from '../lib/activityLog'
 import { locationColorStyle } from '../lib/colors'
 import { Roles, AllDisposalReasons, disposalReasonDisplayName, disposalReasonBadgeClass, DisposalReasons } from '../lib/enums'
 import { ExpiringItemsPanel, StockBatchPicker } from '../components/StockBatchPicker'
+import { DateRangeFilter } from '../components/DateRangeFilter'
+ import { withinRange } from '../lib/dateRange'
 import { fetchExpiringItems, isExpired } from '../lib/stockBatch'
 import { FlashMessage } from '../components/FlashMessage'
+import { ConfirmActionModal } from '../components/ConfirmActionModal'
 import { exportToExcel } from '../lib/excelExport'
 import type { SupplyItem, SupplyLocation, SupplyDisposalLog } from '../types/db'
 
@@ -20,6 +24,7 @@ export function SupplyDisposalCreate() {
   const { profile } = useAuth()
   const isAdmin = profile?.role_name === Roles.Admin
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
 
   const [locations, setLocations] = useState<SupplyLocation[]>([])
   const [locationId, setLocationId] = useState<number | null>(profile?.location_id ?? null)
@@ -33,6 +38,7 @@ export function SupplyDisposalCreate() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false) // 送出前確認視窗（p.13）
 
   const picker = useItemPicker(locationId, stockTypeFilter || undefined)
   const { items: pickerItems, setCategory, setItemName, setItemId } = picker
@@ -76,13 +82,38 @@ export function SupplyDisposalCreate() {
     setQuantity(String(item.quantity))
   }
 
+  // 物資總覽「已過期」清單的「報廢」帶 ?supplyItemId= 進來時：直接抓該批次並帶入
+  // （沿用 quickPick：設定據點、選取批次、過期自動帶原因、帶入現有數量）。
+  useEffect(() => {
+    const id = searchParams.get('supplyItemId')
+    if (!id) return
+    let cancelled = false
+    supabase
+      .from('supply_item')
+      .select('*')
+      .eq('id', Number(id))
+      .single()
+      .then(({ data }) => {
+        if (!cancelled && data) quickPick(data as SupplyItem)
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
+
   // 切換分類後已選的物資可能不在範圍內，直接清空已選內容。
   function changeStockType(value: string) {
     setStockTypeFilter(value)
     picker.reset()
   }
 
-  async function handleSubmit(e: FormEvent) {
+  function locationName(id: number | null): string {
+    if (id == null) return '—'
+    return locations.find((l) => l.id === id)?.location_name ?? `#${id}`
+  }
+
+  function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     setSuccess(null)
@@ -100,7 +131,12 @@ export function SupplyDisposalCreate() {
       setError(`報廢數量超過現有庫存（現有 ${selected.quantity} ${selected.unit ?? ''}）`)
       return
     }
+    setConfirmOpen(true)
+  }
 
+  async function doDisposal() {
+    if (!locationId || !selected) return
+    const qty = Number(quantity)
     setSubmitting(true)
     const { data, error: invokeError } = await supabase.functions.invoke('disposal-create', {
       body: {
@@ -116,9 +152,11 @@ export function SupplyDisposalCreate() {
     // 失敗時要拿 Edge Function 自己的中文訊息：supabase-js 會把非 2xx 的內容
     // 換成 "non-2xx status code"，真正的原因藏在 response body 裡。
     if (invokeError || !data?.success) {
+      setConfirmOpen(false)
       setError(data?.message ?? (await functionErrorMessage(invokeError, '報廢失敗')))
       return
     }
+    void logActivity({ action: 'disposal', category: '庫存異動', targetTable: 'supply_disposal_log', targetId: selected.id, locationId: Number(locationId), summary: `報廢「${selected.item_name}」${qty} ${selected.unit ?? ''}（${disposalReasonDisplayName(reason)}）`, detail: { reason, remark: remark || null } })
     navigate('/disposals', { state: { flash: data.message } })
   }
 
@@ -140,6 +178,7 @@ export function SupplyDisposalCreate() {
         title="即期／已過期物資，請確認是否需要報廢"
         actionLabel="選擇報廢"
         onPick={quickPick}
+        defaultCollapsed
       />
 
       {error && <div className="alert alert-danger">{error}</div>}
@@ -240,17 +279,52 @@ export function SupplyDisposalCreate() {
           </div>
         </div>
       </div>
+
+      {confirmOpen && selected && (
+        <ConfirmActionModal
+          title="確認本次報廢內容"
+          icon="bi-trash3"
+          confirmLabel="確認報廢"
+          submitting={submitting}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={() => void doDisposal()}
+          fields={[
+            { label: '報廢原因', value: <span className={`badge ${disposalReasonBadgeClass(reason)}`}>{disposalReasonDisplayName(reason)}</span> },
+            { label: '所在據點', value: locationName(locationId) },
+            { label: '操作人員', value: operatorName || '—' },
+            ...(remark.trim() ? [{ label: '備註', value: remark.trim(), full: true }] : []),
+          ]}
+          items={[
+            {
+              name: selected.item_name,
+              category: selected.category,
+              spec: selected.specification,
+              expiration: selected.expiration_date,
+              quantity: Number(quantity),
+              unit: selected.unit,
+              extra: `${selected.quantity - Number(quantity)} ${selected.unit ?? ''}`,
+            },
+          ]}
+          extraHeader="報廢數量"
+          extraColHeader="報廢後剩餘"
+          warning={<>按下「確認報廢」後會<strong>立刻扣除庫存，且無法直接復原</strong>。請再確認一次品項與數量。</>}
+        />
+      )}
     </div>
   )
 }
 
 export function SupplyDisposalIndex() {
+  const { profile } = useAuth()
+  const isAdmin = profile?.role_name === Roles.Admin
   const [logs, setLogs] = useState<SupplyDisposalLog[]>([])
   const [locations, setLocations] = useState<SupplyLocation[]>([])
   const [items, setItems] = useState<SupplyItem[]>([])
   const [keyword, setKeyword] = useState('')
   const [locationFilter, setLocationFilter] = useState('')
   const [reasonFilter, setReasonFilter] = useState('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -273,10 +347,14 @@ export function SupplyDisposalIndex() {
     return items.find((i) => i.id === id)
   }
 
+  const myLoc = profile?.location_id ?? null
   const filteredLogs = useMemo(() => {
     return logs.filter((log) => {
+      // 幫主只看自己據點的報廢紀錄（看不到別據點）；總管不限。
+      if (!isAdmin && myLoc != null && log.location_id !== myLoc) return false
       if (locationFilter && log.location_id !== Number(locationFilter)) return false
       if (reasonFilter && log.reason !== reasonFilter) return false
+      if (!withinRange(log.disposal_time, fromDate, toDate)) return false
       if (keyword.trim()) {
         const k = keyword.trim().toLowerCase()
         const matches =
@@ -288,7 +366,7 @@ export function SupplyDisposalIndex() {
       return true
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logs, keyword, locationFilter, reasonFilter, items])
+  }, [logs, keyword, locationFilter, reasonFilter, fromDate, toDate, items])
 
   function locationName(id: number): string {
     return locations.find((l) => l.id === id)?.location_name ?? `#${id}`
@@ -296,11 +374,11 @@ export function SupplyDisposalIndex() {
 
   function handleExport() {
     exportToExcel<SupplyDisposalLog>('報廢紀錄', '報廢紀錄', [
-      { header: '報廢時間', value: (l) => new Date(l.disposal_time).toLocaleString('zh-TW') },
+      { header: '報廢時間', value: (l) => new Date(l.disposal_time).toLocaleDateString('zh-TW') },
       { header: '物資名稱', value: (l) => itemOf(l.supply_item_id)?.item_name ?? `物資 #${l.supply_item_id}` },
       { header: '規格', value: (l) => itemOf(l.supply_item_id)?.specification ?? '' },
       { header: '據點', value: (l) => locationName(l.location_id) },
-      { header: '數量', value: (l) => l.disposal_quantity },
+      { header: '數量', value: (l) => l.disposal_quantity, total: true },
       { header: '單位', value: (l) => itemOf(l.supply_item_id)?.unit ?? '' },
       { header: '原因', value: (l) => disposalReasonDisplayName(l.reason) },
       { header: '操作人員', value: (l) => l.operator ?? '' },
@@ -318,9 +396,12 @@ export function SupplyDisposalIndex() {
           <button className="btn btn-outline-success" onClick={handleExport} disabled={filteredLogs.length === 0}>
             <i className="bi bi-file-earmark-excel" /> 匯出 Excel
           </button>
-          <Link className="btn btn-primary" to="/disposals/create">
-            <i className="bi bi-plus-circle" /> 新增報廢
-          </Link>
+          {/* 報廢建立僅總管；幫主／小幫手改用「舉手／申請報廢」，此處直接隱藏。 */}
+          {isAdmin && (
+            <Link className="btn btn-primary" to="/disposals/create">
+              <i className="bi bi-plus-circle" /> 新增報廢
+            </Link>
+          )}
         </div>
       </div>
       <FlashMessage />
@@ -356,6 +437,10 @@ export function SupplyDisposalIndex() {
                 ))}
               </select>
             </div>
+            <div className="col-md-4">
+              <label className="form-label">報廢日期區間</label>
+              <DateRangeFilter from={fromDate} to={toDate} onFrom={setFromDate} onTo={setToDate} />
+            </div>
             <div className="col-md-2 d-flex align-items-end">
               <button
                 type="button"
@@ -364,6 +449,8 @@ export function SupplyDisposalIndex() {
                   setKeyword('')
                   setLocationFilter('')
                   setReasonFilter('')
+                  setFromDate('')
+                  setToDate('')
                 }}
               >
                 <i className="bi bi-arrow-clockwise" /> 重設
@@ -403,7 +490,7 @@ export function SupplyDisposalIndex() {
                 ) : (
                   filteredLogs.map((log) => (
                     <tr key={log.id}>
-                      <td className="col-min">{new Date(log.disposal_time).toLocaleString('zh-TW')}</td>
+                      <td className="col-min">{new Date(log.disposal_time).toLocaleDateString('zh-TW')}</td>
                       <td>
                         <strong>{itemOf(log.supply_item_id)?.item_name ?? `物資 #${log.supply_item_id}`}</strong>
                         {itemOf(log.supply_item_id)?.specification ? (

@@ -11,7 +11,13 @@ import { Roles, StockTypes, AllStockTypes, stockTypeDisplayName, stockTypeBadgeC
 import { locationColorStyle } from '../lib/colors'
 import { FlashMessage } from '../components/FlashMessage'
 import { exportToExcel } from '../lib/excelExport'
+import { DateSelect } from '../components/DateSelect'
+import { DateRangeFilter } from '../components/DateRangeFilter'
+import { withinRange } from '../lib/dateRange'
 import { fetchLowStock, isItemLowStock, emptyLowStock, type LowStockData } from '../lib/lowStock'
+import { EXPIRY_WARNING_DAYS } from '../lib/stockBatch'
+import { logActivity } from '../lib/activityLog'
+import { RaiseRequestModal, type RaiseTarget } from '../components/RaiseRequestModal'
 import type { SupplyItem, SupplyLocation } from '../types/db'
 
 interface ItemSummaryRow {
@@ -36,7 +42,7 @@ function itemStatus(item: SupplyItem, low: LowStockData): { label: string; badge
     const exp = new Date(item.expiration_date)
     if (exp < today()) return { label: '已過期', badgeClass: 'bg-dark' }
     const in30 = new Date(today())
-    in30.setDate(in30.getDate() + 30)
+    in30.setDate(in30.getDate() + EXPIRY_WARNING_DAYS)
     if (exp <= in30) return { label: '即將過期', badgeClass: 'bg-warning text-dark' }
   }
   return { label: '正常', badgeClass: 'bg-success' }
@@ -45,11 +51,22 @@ function itemStatus(item: SupplyItem, low: LowStockData): { label: string; badge
 export function SupplyItems() {
   const { profile } = useAuth()
   const isAdmin = profile?.role_name === Roles.Admin
-  const isAdminOrCadre = isAdmin || profile?.role_name === Roles.Cadre
+  const isCadre = profile?.role_name === Roles.Cadre
+  const myLocId = profile?.location_id ?? null
+  // 物資清單操作權限：總管不限；幫主只能操作自己據點的物資；小幫手唯讀。
+  const canOperate = (item: SupplyItem) => isAdmin || (isCadre && item.location_id === myLocId)
   const [searchParams] = useSearchParams()
   const [items, setItems] = useState<SupplyItem[]>([])
   const [locations, setLocations] = useState<SupplyLocation[]>([])
+  // 目錄定義 + 規格：編輯時補規格用（依 種類+名稱 找定義，列出其規格）。
+  const [definitions, setDefinitions] = useState<{ id: number; category: string; item_name: string }[]>([])
+  const [variants, setVariants] = useState<{ id: number; inventory_item_definition_id: number; specification: string | null; is_active: boolean }[]>([])
   const [lowStock, setLowStock] = useState<LowStockData>(emptyLowStock)
+  // 據點門檻（location_inventory_safety_stock）：物資清單「安全庫存」直接顯示此值，
+  // 與「庫存種類設定 → 據點門檻」同一來源，讀取用。
+  const [safetyStocks, setSafetyStocks] = useState<{ location_id: number; inventory_item_definition_id: number; safety_stock: number }[]>([])
+  // 總量不足（全系統）判斷用：global_low_stock_view 的 種類|名稱|規格 集合。
+  const [globalLowKeys, setGlobalLowKeys] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -57,9 +74,28 @@ export function SupplyItems() {
   const [photoPreview, setPhotoPreview] = useState<SupplyItem | null>(null)
   const [detailsItem, setDetailsItem] = useState<SupplyItem | null>(null)
   const [editItem, setEditItem] = useState<SupplyItem | null>(null)
-  const [editForm, setEditForm] = useState({ quantity: '', expirationDate: '', safetyStock: '', remark: '' })
+  const [editForm, setEditForm] = useState({ quantity: '', expirationDate: '', safetyStock: '', remark: '', variantId: '' })
   const [editPhoto, setEditPhoto] = useState<File | null>(null)
   const [editSaving, setEditSaving] = useState(false)
+  // 舉手調貨：幫主在物資清單看別據點物資時，可直接向該據點舉手（總管可直接操作、不需舉手）。
+  const [raiseTarget, setRaiseTarget] = useState<RaiseTarget | null>(null)
+
+  // 這筆物資對應的定義底下、可選的規格（供編輯補規格）。
+  function variantsFor(item: SupplyItem) {
+    const def = definitions.find((d) => d.category === item.category && d.item_name === item.item_name)
+    if (!def) return [] as { id: number; specification: string | null }[]
+    return variants.filter((v) => v.inventory_item_definition_id === def.id && v.is_active)
+  }
+
+  // 這筆物資的「安全庫存」＝該據點此品項（定義）的據點門檻（庫存種類設定所設）。
+  // 唯讀顯示，與低庫存判斷同一來源；找不到定義或未設定則為 0。
+  function thresholdFor(item: SupplyItem): number {
+    const defId =
+      lowStock.resolvedByItemId.get(item.id) ??
+      definitions.find((d) => d.category === item.category && d.item_name === item.item_name)?.id
+    if (defId == null) return 0
+    return safetyStocks.find((s) => s.location_id === item.location_id && s.inventory_item_definition_id === defId)?.safety_stock ?? 0
+  }
 
   function openEdit(item: SupplyItem) {
     setEditItem(item)
@@ -68,6 +104,7 @@ export function SupplyItems() {
       expirationDate: item.expiration_date ?? '',
       safetyStock: String(item.safety_stock),
       remark: item.remark ?? '',
+      variantId: item.inventory_item_variant_id ? String(item.inventory_item_variant_id) : '',
     })
     setEditPhoto(null)
   }
@@ -90,23 +127,33 @@ export function SupplyItems() {
       imagePath = path
     }
 
+    // 規格補登：依選到的規格帶入 variant id 與規格文字（選「無」則清空）。
+    const chosenVariant = editForm.variantId ? variants.find((v) => v.id === Number(editForm.variantId)) : null
+
+    // 安全庫存（低庫存門檻）不在此編輯，統一由「庫存種類設定 → 據點門檻」維護，
+    // 這裡不寫 safety_stock，避免兩處不同步。
     const { error: updErr } = await supabase
       .from('supply_item')
       .update({
         quantity: Number(editForm.quantity),
         expiration_date: editItem.stock_type === StockTypes.NoExpiry ? null : editForm.expirationDate || null,
-        safety_stock: Number(editForm.safetyStock) || 0,
         remark: editForm.remark.trim() || null,
+        inventory_item_variant_id: chosenVariant ? chosenVariant.id : null,
+        specification: chosenVariant ? chosenVariant.specification : null,
         image_path: imagePath,
+        updated_by: profile?.display_name ?? profile?.username ?? null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', editItem.id)
 
-    setEditSaving(false)
     if (updErr) {
+      setEditSaving(false)
       setError(updErr.message)
       return
     }
+
+    void logActivity({ action: 'item_edit', category: '資料維護', targetTable: 'supply_item', targetId: editItem.id, locationId: editItem.location_id, summary: `編輯物資「${editItem.item_name}」`, detail: { quantity: Number(editForm.quantity), specification: chosenVariant?.specification ?? null } })
+    setEditSaving(false)
     setEditItem(null)
     void load()
   }
@@ -116,9 +163,14 @@ export function SupplyItems() {
   const [locationFilter, setLocationFilter] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [stockTypeFilter, setStockTypeFilter] = useState('')
+  // 狀態篩選：'' 全部 / lowStock 低庫存 / expiringSoon 即將即期 / globalLow 總量不足 / expired 已過期
+  const [statusFilter, setStatusFilter] = useState('')
   const [summaryOpen, setSummaryOpen] = useState(true)
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+  const [showHidden, setShowHidden] = useState(false) // #4：顯示「數量0超過7天」被隱藏的批次
 
-  // 從戰情總覽「查看物資」帶入的據點篩選（?locationId=）
+  // 從物資總覽「查看物資」帶入的據點篩選（?locationId=）
   useEffect(() => {
     const qLocationId = searchParams.get('locationId')
     if (qLocationId) setLocationFilter(qLocationId)
@@ -126,15 +178,29 @@ export function SupplyItems() {
 
   async function load() {
     setLoading(true)
-    const [itemsRes, locRes, low] = await Promise.all([
+    const [itemsRes, locRes, low, globalRes, defRes, varRes, safetyRes] = await Promise.all([
       supabase.from('supply_item').select('*').eq('is_active', true).order('id', { ascending: false }),
       supabase.from('supply_location').select('*').eq('is_active', true).order('id'),
       fetchLowStock(),
+      supabase.from('global_low_stock_view').select('category, item_name, specification'),
+      supabase.from('inventory_item_definition').select('id, category, item_name'),
+      supabase.from('inventory_item_variant').select('id, inventory_item_definition_id, specification, is_active'),
+      supabase.from('location_inventory_safety_stock').select('location_id, inventory_item_definition_id, safety_stock'),
     ])
     if (itemsRes.error) setError(itemsRes.error.message)
     setItems((itemsRes.data ?? []) as SupplyItem[])
     setLocations((locRes.data ?? []) as SupplyLocation[])
+    setDefinitions((defRes.data ?? []) as { id: number; category: string; item_name: string }[])
+    setVariants((varRes.data ?? []) as { id: number; inventory_item_definition_id: number; specification: string | null; is_active: boolean }[])
+    setSafetyStocks((safetyRes.data ?? []) as { location_id: number; inventory_item_definition_id: number; safety_stock: number }[])
     setLowStock(low)
+    setGlobalLowKeys(
+      new Set(
+        ((globalRes.data ?? []) as { category: string; item_name: string; specification: string | null }[]).map(
+          (g) => `${g.category}|${g.item_name}|${g.specification ?? ''}`
+        )
+      )
+    )
     setLoading(false)
   }
 
@@ -144,11 +210,43 @@ export function SupplyItems() {
 
   const categories = useMemo(() => Array.from(new Set(items.map((i) => i.category))).sort(), [items])
 
-  const filteredItems = useMemo(() => {
+  function isGlobalLow(i: SupplyItem): boolean {
+    return globalLowKeys.has(`${i.category}|${i.item_name}|${i.specification ?? ''}`)
+  }
+
+  function matchesStatus(i: SupplyItem): boolean {
+    if (!statusFilter) return true
+    const todayStr = new Date().toISOString().slice(0, 10)
+    const in30Str = new Date(Date.now() + EXPIRY_WARNING_DAYS * 86400000).toISOString().slice(0, 10)
+    switch (statusFilter) {
+      case 'lowStock':
+        return isItemLowStock(i, lowStock)
+      case 'expiringSoon':
+        return i.expiration_date != null && i.expiration_date >= todayStr && i.expiration_date <= in30Str
+      case 'globalLow':
+        return isGlobalLow(i)
+      case 'expired':
+        return i.expiration_date != null && i.expiration_date < todayStr
+      default:
+        return true
+    }
+  }
+
+  // #4：數量為 0 且超過 7 天未異動（updated_at/建立時間）視為「長期零庫存」，預設隱藏。
+  function isLongZero(i: SupplyItem): boolean {
+    if (i.quantity !== 0) return false
+    const last = i.updated_at ?? i.created_at
+    if (!last) return false
+    return Date.now() - new Date(last).getTime() > 7 * 86400000
+  }
+
+  const baseFiltered = useMemo(() => {
     return items.filter((i) => {
       if (locationFilter && i.location_id !== Number(locationFilter)) return false
       if (categoryFilter && i.category !== categoryFilter) return false
       if (stockTypeFilter && i.stock_type !== stockTypeFilter) return false
+      if (!matchesStatus(i)) return false
+      if (!withinRange(i.expiration_date, fromDate, toDate)) return false // 有效期限區間（NoExpiry 無效期者，設區間時不列入）
       if (keyword.trim()) {
         const k = keyword.trim().toLowerCase()
         const matches =
@@ -160,7 +258,15 @@ export function SupplyItems() {
       }
       return true
     })
-  }, [items, keyword, locationFilter, categoryFilter, stockTypeFilter])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, keyword, locationFilter, categoryFilter, stockTypeFilter, statusFilter, lowStock, globalLowKeys, fromDate, toDate])
+
+  const hiddenCount = useMemo(() => baseFiltered.filter(isLongZero).length, [baseFiltered])
+  // showHidden=true 時「只顯示」被隱藏(長期零庫存)的項目，方便單獨檢視；否則顯示一般項目。
+  const filteredItems = useMemo(
+    () => (showHidden ? baseFiltered.filter((i) => isLongZero(i)) : baseFiltered.filter((i) => !isLongZero(i))),
+    [baseFiltered, showHidden]
+  )
 
   // 依物資統計（跨據點加總）：對目前篩選結果依物資名稱分組
   const itemSummary = useMemo<ItemSummaryRow[]>(() => {
@@ -206,6 +312,9 @@ export function SupplyItems() {
     setLocationFilter('')
     setCategoryFilter('')
     setStockTypeFilter('')
+    setStatusFilter('')
+    setFromDate('')
+    setToDate('')
   }
 
   function locationName(id: number): string {
@@ -217,12 +326,12 @@ export function SupplyItems() {
       { header: '種類', value: (i) => i.category },
       { header: '名稱', value: (i) => i.item_name },
       { header: '規格', value: (i) => i.specification ?? '' },
-      { header: '數量', value: (i) => i.quantity },
+      { header: '數量', value: (i) => i.quantity, total: true },
       { header: '單位', value: (i) => i.unit ?? '' },
       { header: '庫存分類', value: (i) => stockTypeDisplayName(i.stock_type) },
       { header: '有效期限', value: (i) => i.expiration_date ?? '' },
       { header: '據點', value: (i) => locationName(i.location_id) },
-      { header: '安全庫存', value: (i) => i.safety_stock },
+      { header: '安全庫存', value: (i) => thresholdFor(i) },
       { header: '狀態', value: (i) => itemStatus(i, lowStock).label },
       { header: '備註', value: (i) => i.remark ?? '' },
     ], filteredItems)
@@ -236,6 +345,7 @@ export function SupplyItems() {
       return
     }
     if (item.image_path) await deleteItemPhoto(item.image_path)
+    void logActivity({ action: 'item_delete', category: '資料維護', targetTable: 'supply_item', targetId: item.id, locationId: item.location_id, summary: `刪除物資「${item.item_name}」` })
     void load()
   }
 
@@ -243,20 +353,34 @@ export function SupplyItems() {
     <div className="container-fluid mt-4">
       <div className="d-flex justify-content-between align-items-center mb-4">
         <h2>
-          <i className="bi bi-box" /> 物資管理
+          <i className="bi bi-box" /> 物資清單
+          {!isAdmin && !isCadre && <span className="badge bg-secondary ms-2 align-middle fs-6">唯讀檢視</span>}
+          {isCadre && <span className="badge bg-info text-dark ms-2 align-middle fs-6">僅可操作自己據點</span>}
         </h2>
         <div className="d-flex gap-2">
+          {/* #4：數量0超過7天的批次預設隱藏；用眼睛切換顯示/隱藏 */}
+          <button type="button" className={`btn ${showHidden ? 'btn-warning' : 'btn-outline-secondary'}`} onClick={() => setShowHidden((v) => !v)} title="數量0超過7天的批次">
+            <i className={`bi ${showHidden ? 'bi-arrow-left' : 'bi-eye'}`} /> {showHidden ? '返回一般清單' : `顯示已隱藏${hiddenCount > 0 ? `（${hiddenCount}）` : ''}`}
+          </button>
           <button className="btn btn-outline-success" onClick={handleExport} disabled={filteredItems.length === 0}>
             <i className="bi bi-file-earmark-excel" /> 匯出 Excel
           </button>
-          <Link className="btn btn-primary" to="/stock-in">
-            <i className="bi bi-box-arrow-in-down" /> 物資入庫
-          </Link>
+          {(isAdmin || isCadre) && (
+            <Link className="btn btn-primary" to="/stock-in">
+              <i className="bi bi-box-arrow-in-down" /> 物資入庫
+            </Link>
+          )}
         </div>
       </div>
 
       <FlashMessage />
       {error && <div className="alert alert-danger">{error}</div>}
+
+      {showHidden && (
+        <div className="alert alert-warning py-2">
+          <i className="bi bi-eye" /> 目前只顯示<strong>已隱藏</strong>的項目（數量 0 超過 7 天，共 {hiddenCount} 筆）。按右上「返回一般清單」回到正常檢視。
+        </div>
+      )}
 
       {/* 分類快速切換 */}
       <div className="btn-group mb-3" role="group">
@@ -295,7 +419,17 @@ export function SupplyItems() {
                 onChange={(e) => setKeyword(e.target.value)}
               />
             </div>
-            <div className="col-md-3">
+            <div className="col-md-2">
+              <label className="form-label">狀態</label>
+              <select className="form-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="">全部狀態</option>
+                <option value="lowStock">低庫存</option>
+                <option value="expiringSoon">即將即期</option>
+                <option value="globalLow">總量不足</option>
+                <option value="expired">已過期</option>
+              </select>
+            </div>
+            <div className="col-md-2">
               <label className="form-label">據點</label>
               <select className="form-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
                 <option value="">全部據點</option>
@@ -306,7 +440,7 @@ export function SupplyItems() {
                 ))}
               </select>
             </div>
-            <div className="col-md-3">
+            <div className="col-md-2">
               <label className="form-label">種類</label>
               <select className="form-select" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
                 <option value="">全部種類</option>
@@ -321,6 +455,11 @@ export function SupplyItems() {
               <button type="button" className="btn btn-secondary w-100" onClick={resetFilters}>
                 <i className="bi bi-arrow-clockwise" /> 重設
               </button>
+            </div>
+            <div className="col-12">
+              <label className="form-label">有效期限區間</label>
+              <DateRangeFilter from={fromDate} to={toDate} onFrom={setFromDate} onTo={setToDate} />
+              <div className="form-text">依有效期限篩選；「無效期物資」在設定區間時不會列入。</div>
             </div>
           </div>
         </div>
@@ -444,7 +583,7 @@ export function SupplyItems() {
                           </span>
                         </td>
                         <td>
-                          {item.safety_stock} {item.unit}
+                          {thresholdFor(item)} {item.unit}
                         </td>
                         <td>
                           <span className={`badge ${status.badgeClass}`}>{status.label}</span>
@@ -454,17 +593,37 @@ export function SupplyItems() {
                             <button className="btn btn-info" title="詳細資料" onClick={() => setDetailsItem(item)}>
                               <i className="bi bi-eye" />
                             </button>
-                            {isAdminOrCadre && (
+                            {/* 舉手：幫主看別據點物資（唯讀）時，可直接向該據點舉手調貨到自己據點。 */}
+                            {isCadre && item.location_id !== myLocId && (
+                              <button
+                                className="btn btn-primary"
+                                title="向此據點舉手調貨"
+                                onClick={() =>
+                                  setRaiseTarget({
+                                    category: item.category,
+                                    item_name: item.item_name,
+                                    specification: item.specification,
+                                    unit: item.unit,
+                                    locationId: item.location_id,
+                                    quantity: item.quantity,
+                                  })
+                                }
+                              >
+                                <i className="bi bi-hand-index-thumb" />
+                              </button>
+                            )}
+                            {/* 編輯/轉移/刪除：總管不限；幫主限自己據點；小幫手唯讀。 */}
+                            {canOperate(item) && (
                               <button className="btn btn-warning" title="編輯" onClick={() => openEdit(item)}>
                                 <i className="bi bi-pencil" />
                               </button>
                             )}
-                            {isAdminOrCadre && (
+                            {canOperate(item) && (
                               <Link className="btn btn-primary" title="物資轉移" to={`/transfers/create?supplyItemId=${item.id}`}>
                                 <i className="bi bi-arrow-left-right" />
                               </Link>
                             )}
-                            {isAdmin && (
+                            {canOperate(item) && (
                               <button className="btn btn-danger" title="刪除" onClick={() => void handleDelete(item)}>
                                 <i className="bi bi-trash" />
                               </button>
@@ -543,7 +702,7 @@ export function SupplyItems() {
                   <dd className="col-8">{locationName(detailsItem.location_id)}</dd>
                   <dt className="col-4">安全庫存</dt>
                   <dd className="col-8">
-                    {detailsItem.safety_stock} {detailsItem.unit}
+                    {thresholdFor(detailsItem)} {detailsItem.unit}
                   </dd>
                   <dt className="col-4">狀態</dt>
                   <dd className="col-8">
@@ -607,25 +766,25 @@ export function SupplyItems() {
                       />
                     </div>
                     <div className="col-md-6 mb-3">
-                      <label className="form-label">安全庫存</label>
-                      <input
-                        className="form-control"
-                        type="number"
-                        min={0}
-                        value={editForm.safetyStock}
-                        onChange={(e) => setEditForm({ ...editForm, safetyStock: e.target.value })}
-                      />
+                      <label className="form-label">安全庫存（低庫存門檻）</label>
+                      <input className="form-control" type="number" value={thresholdFor(editItem)} disabled readOnly />
+                      <div className="form-text">此為該據點此品項的低庫存門檻，來自「系統管理 → 庫存種類設定 → 據點門檻」，此處僅顯示、不可修改。</div>
                     </div>
+                  </div>
+                  <div className="mb-3">
+                    <label className="form-label">規格</label>
+                    <select className="form-select" value={editForm.variantId} onChange={(e) => setEditForm({ ...editForm, variantId: e.target.value })}>
+                      <option value="">無（未指定）</option>
+                      {variantsFor(editItem).map((v) => (
+                        <option key={v.id} value={v.id}>{v.specification ?? '無規格'}</option>
+                      ))}
+                    </select>
+                    <div className="form-text">入庫時未指定規格的物資，總管在「庫存種類設定」新增規格後，可在此補上分類。</div>
                   </div>
                   {editItem.stock_type !== StockTypes.NoExpiry && (
                     <div className="mb-3">
                       <label className="form-label">有效期限</label>
-                      <input
-                        className="form-control"
-                        type="date"
-                        value={editForm.expirationDate}
-                        onChange={(e) => setEditForm({ ...editForm, expirationDate: e.target.value })}
-                      />
+                      <DateSelect value={editForm.expirationDate} onChange={(v) => setEditForm({ ...editForm, expirationDate: v })} />
                     </div>
                   )}
                   <div className="mb-3">
@@ -655,6 +814,20 @@ export function SupplyItems() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 舉手：向別據點調貨（共用元件） */}
+      {raiseTarget && (
+        <RaiseRequestModal
+          target={raiseTarget}
+          locations={locations}
+          items={items}
+          onClose={() => setRaiseTarget(null)}
+          onDone={(flash) => {
+            setRaiseTarget(null)
+            alert(flash)
+          }}
+        />
       )}
     </div>
   )

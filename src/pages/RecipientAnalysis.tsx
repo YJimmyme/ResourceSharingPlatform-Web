@@ -6,7 +6,7 @@
 //   明細維度（次軸）= 每一列展開後看到的分佈，預設「物資品項」。
 //
 // 於是同一頁可以回答不同問題，差別只在第一個條件選什麼：
-//   第一條件＝使用人   → 一列一位領用人，明細是「他領了哪些物資」
+//   第一條件＝使用人   → 一列一位使用人，明細是「他領了哪些物資」
 //   第一條件＝鄉鎮別   → 一列一個鄉鎮，明細是「該鄉鎮領走哪些物資」
 //   第一條件＝物資品項 → 一列一項物資，明細預設改看「哪些鄉鎮領走」
 //
@@ -14,8 +14,11 @@
 // 直接讀 supply_outbound_log 明細（RLS 一樣限縮據點），已取消的一律排除。
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
-import { recipientIdentityDisplayName } from '../lib/yunlinDistricts'
+import { recipientIdentityDisplayName, RecipientIdentities, YunlinPrecincts } from '../lib/yunlinDistricts'
 import { AnalysisFilterModal } from '../components/AnalysisFilterModal'
+import { DateRangeFilter } from '../components/DateRangeFilter'
+ import { withinRange } from '../lib/dateRange'
+import { exportSheetsToExcel } from '../lib/excelExport'
 import {
   AllFilterFields,
   EMPTY_VALUE,
@@ -58,6 +61,8 @@ export function RecipientAnalysis() {
   const [editing, setEditing] = useState<AnalysisFilter | null>(null)
   const [detailOverride, setDetailOverride] = useState<FilterField | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
 
   useEffect(() => {
     async function load() {
@@ -79,8 +84,11 @@ export function RecipientAnalysis() {
     [items]
   )
 
-  // 已取消的不列入任何統計。
-  const activeLogs = useMemo(() => logs.filter((l) => !l.is_cancelled), [logs])
+  // 已取消的不列入任何統計；再套用日期區間。
+  const activeLogs = useMemo(
+    () => logs.filter((l) => !l.is_cancelled && withinRange(l.outbound_time, fromDate, toDate)),
+    [logs, fromDate, toDate]
+  )
 
   const valueOf = useCallback(
     (log: SupplyOutboundLog, field: FilterField): string => {
@@ -225,21 +233,158 @@ export function RecipientAnalysis() {
 
   const detailChoices = AllFilterFields.filter((f) => f !== primaryField)
 
+  const dateStr = useCallback((t: string) => new Date(t).toLocaleDateString('zh-TW'), [])
+  // 一次領取事件：同一 batch_id 算一次；沒有 batch_id 的舊資料，每筆各算一次。
+  const eventKey = (l: SupplyOutboundLog) => l.batch_id ?? `single-${l.id}`
+
+  // 匯出①：領取分析_使用人 —— 依使用人分組，列出其各物資品項與數量。
+  // 欄位（依範本）：每次領用日期, 使用人, 領取次數, 領取件數, 物資品項, 數量, 領用人/社工。
+  function handleExportByUser() {
+    const header = ['每次領用日期', '使用人', '領取次數', '領取件數', '物資品項', '數量', '領用人/社工']
+    const rows: (string | number)[][] = [header]
+    // 依「使用人 + 日期」分組：不同日期各自一列區塊，才看得出誰在哪一天領了什麼。
+    const map = new Map<
+      string,
+      { name: string; date: string; events: Set<string>; operators: Set<string>; total: number; items: Map<string, number> }
+    >()
+    for (const l of filteredLogs) {
+      const date = dateStr(l.outbound_time)
+      const k = `${l.recipient_name}||${l.recipient_contact ?? ''}||${date}`
+      let g = map.get(k)
+      if (!g) {
+        g = { name: l.recipient_name || '（未填）', date, events: new Set(), operators: new Set(), total: 0, items: new Map() }
+        map.set(k, g)
+      }
+      g.events.add(eventKey(l))
+      if (l.operator) g.operators.add(l.operator)
+      g.total += l.outbound_quantity
+      const item = itemNameOf(l.supply_item_id)
+      g.items.set(item, (g.items.get(item) ?? 0) + l.outbound_quantity)
+    }
+    // 同一位使用人的多個日期相鄰排列：先依姓名、再依日期。
+    const sorted = [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant') || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    for (const g of sorted) {
+      const items = [...g.items.entries()].sort((a, b) => b[1] - a[1])
+      const ops = [...g.operators].join('、')
+      items.forEach(([item, qty], i) => {
+        rows.push([
+          i === 0 ? g.date : '',
+          i === 0 ? g.name : '',
+          i === 0 ? g.events.size : '',
+          i === 0 ? g.total : '',
+          item,
+          qty,
+          i === 0 ? ops : '',
+        ])
+      })
+      if (items.length === 0) rows.push([g.date, g.name, g.events.size, g.total, '', '', ops])
+    }
+    exportSheetsToExcel('領取分析_使用人', [{ name: '領取分析', rows }])
+  }
+
+  // 匯出②：領取分析（總分析）—— 兩個工作表。
+  //   工作表1 總分析：依「日期×物資品項」彙總，含身分別(件數)、領用人數、各鄉鎮(件數)、領取件數。
+  //   工作表2 操作人員-社工：每筆領取明細。
+  function handleExportSummary() {
+    const townships = YunlinPrecincts.flatMap((p) => p.townships)
+    // --- 工作表1：總分析 ---
+    const head1 = ['日期', '物資品項', '領取次數', '低收', '中低收', '一般戶', '領用人數', ...townships, '領取件數']
+    const rows1: (string | number)[][] = [head1]
+    const map = new Map<
+      string,
+      {
+        date: string
+        item: string
+        events: Set<string>
+        recipients: Set<string>
+        qty: number
+        identity: Record<string, number>
+        town: Record<string, number>
+      }
+    >()
+    for (const l of filteredLogs) {
+      const date = dateStr(l.outbound_time)
+      const item = itemNameOf(l.supply_item_id)
+      const k = `${date}||${item}`
+      let g = map.get(k)
+      if (!g) {
+        g = { date, item, events: new Set(), recipients: new Set(), qty: 0, identity: {}, town: {} }
+        map.set(k, g)
+      }
+      g.events.add(eventKey(l))
+      g.recipients.add(`${l.recipient_name}||${l.recipient_contact ?? ''}`)
+      g.qty += l.outbound_quantity
+      if (l.recipient_identity) g.identity[l.recipient_identity] = (g.identity[l.recipient_identity] ?? 0) + l.outbound_quantity
+      if (l.recipient_district) g.town[l.recipient_district] = (g.town[l.recipient_district] ?? 0) + l.outbound_quantity
+    }
+    const groupsByDate = [...map.values()].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.qty - a.qty))
+    for (const g of groupsByDate) {
+      rows1.push([
+        g.date,
+        g.item,
+        g.events.size,
+        g.identity[RecipientIdentities.LowIncome] ?? 0,
+        g.identity[RecipientIdentities.MidLowIncome] ?? 0,
+        g.identity[RecipientIdentities.General] ?? 0,
+        g.recipients.size,
+        ...townships.map((t) => g.town[t] ?? 0),
+        g.qty,
+      ])
+    }
+    // --- 工作表2：操作人員-社工 ---
+    const head2 = ['操作人員', '領取日期', '使用人', '身分別', '物資品項', '數量']
+    const rows2: (string | number)[][] = [head2]
+    const detail = [...filteredLogs].sort((a, b) => (a.outbound_time < b.outbound_time ? 1 : -1))
+    for (const l of detail) {
+      rows2.push([
+        l.operator ?? '',
+        dateStr(l.outbound_time),
+        l.recipient_name || '（未填）',
+        recipientIdentityDisplayName(l.recipient_identity),
+        itemNameOf(l.supply_item_id),
+        l.outbound_quantity,
+      ])
+    }
+    exportSheetsToExcel('領取分析', [
+      { name: '總分析', rows: rows1 },
+      { name: '操作人員-社工', rows: rows2 },
+    ])
+  }
+
   return (
     <div className="container-fluid mt-4">
       <div className="d-flex justify-content-between align-items-center mb-4">
         <h2 className="mb-0">
           <i className="bi bi-graph-up" /> 領取分析
         </h2>
-        <button
-          className="btn btn-primary"
-          onClick={() => {
-            setEditing(null)
-            setModalOpen(true)
-          }}
-        >
-          <i className="bi bi-funnel" /> 新增篩選條件
-        </button>
+        <div className="d-flex gap-2">
+          <button className="btn btn-outline-success" onClick={handleExportByUser} disabled={filteredLogs.length === 0}>
+            <i className="bi bi-file-earmark-excel" /> 匯出_使用人
+          </button>
+          <button className="btn btn-outline-success" onClick={handleExportSummary} disabled={filteredLogs.length === 0}>
+            <i className="bi bi-file-earmark-excel" /> 匯出_總分析
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              setEditing(null)
+              setModalOpen(true)
+            }}
+          >
+            <i className="bi bi-funnel" /> 新增篩選條件
+          </button>
+        </div>
+      </div>
+
+      {/* ---------- 日期區間 ---------- */}
+      <div className="card shadow-sm mb-3">
+        <div className="card-body d-flex flex-wrap align-items-center gap-3">
+          <span className="fw-bold"><i className="bi bi-calendar-range" /> 領取日期區間</span>
+          <DateRangeFilter from={fromDate} to={toDate} onFrom={setFromDate} onTo={setToDate} />
+          {(fromDate || toDate) && (
+            <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFromDate(''); setToDate('') }}>清除日期</button>
+          )}
+        </div>
       </div>
 
       {/* ---------- 分析角度 ---------- */}
@@ -272,7 +417,7 @@ export function RecipientAnalysis() {
                 目前沒有篩選條件，預設以<strong>物資品項</strong>為分析角度。
                 <br />
                 <strong>加入的第一個篩選條件會成為分析角度</strong>；例如第一個選「使用人」，
-                下表就會變成一列一位領用人、明細是他領了哪些物資。
+                下表就會變成一列一位使用人、明細是他領了哪些物資。
               </>
             ) : (
               <>
@@ -358,7 +503,7 @@ export function RecipientAnalysis() {
       <div className="row g-3 mb-4">
         {[
           { label: `${FilterFieldLabels[primaryField]}項目數`, value: groups.length },
-          { label: '領用人數', value: distinctRecipients },
+          { label: '使用人數', value: distinctRecipients },
           { label: '領取總次數', value: totalPickups },
           { label: '領取總件數', value: totalQuantity },
           { label: '涉及物資批次', value: distinctItems },
@@ -388,7 +533,7 @@ export function RecipientAnalysis() {
                 <th>{FilterFieldLabels[primaryField]}</th>
                 <th className="col-min">領取次數</th>
                 <th className="col-min">領取件數</th>
-                <th className="col-min">領用人數</th>
+                <th className="col-min">使用人數</th>
                 <th>
                   {FilterFieldLabels[detailField]}分佈（依件數排序）
                 </th>

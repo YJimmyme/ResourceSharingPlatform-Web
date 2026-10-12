@@ -4,6 +4,7 @@
 // LocationInventorySafetyStock), not actual stock batches (that's 物資管理).
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { logActivity } from '../lib/activityLog'
 import { AllStockTypes, stockTypeDisplayName, stockTypeBadgeClass } from '../lib/enums'
 import type { InventoryItemDefinition, InventoryItemVariant, LocationInventorySafetyStock, SupplyLocation } from '../types/db'
 
@@ -44,6 +45,7 @@ export function InventoryTypes() {
   const [newSpec, setNewSpec] = useState('')
   const [globalSafetyEditorFor, setGlobalSafetyEditorFor] = useState<InventoryItemDefinition | null>(null)
   const [globalSafetyDraft, setGlobalSafetyDraft] = useState<Record<number, string>>({})
+  const [globalThresholdDraft, setGlobalThresholdDraft] = useState<Record<number, string>>({})
 
   const [safetyEditorFor, setSafetyEditorFor] = useState<InventoryItemDefinition | null>(null)
   const [safetyDraft, setSafetyDraft] = useState<Record<number, string>>({})
@@ -51,7 +53,7 @@ export function InventoryTypes() {
   async function load() {
     setLoading(true)
     const [defRes, varRes, locRes, safetyRes] = await Promise.all([
-      supabase.from('inventory_item_definition').select('*').order('category').order('item_name'),
+      supabase.from('inventory_item_definition').select('*').order('sort_order', { ascending: true }).order('category').order('item_name'),
       supabase.from('inventory_item_variant').select('*'),
       supabase.from('supply_location').select('*').eq('is_active', true).order('id'),
       supabase.from('location_inventory_safety_stock').select('*'),
@@ -86,6 +88,28 @@ export function InventoryTypes() {
     setStatusFilter('')
   }
 
+  // #3：拖拉排序（僅在未套用篩選時開放，避免只重排子集造成混亂）。
+  const canReorder = !keyword.trim() && !stockTypeFilter && !statusFilter
+  const [dragId, setDragId] = useState<number | null>(null)
+  async function persistOrder(arr: InventoryItemDefinition[]) {
+    await Promise.all(arr.map((d, i) => supabase.from('inventory_item_definition').update({ sort_order: i }).eq('id', d.id)))
+    void logActivity({ action: 'inventory_reorder', category: '資料維護', targetTable: 'inventory_item_definition', summary: '調整庫存種類顯示順序' })
+  }
+  function handleDropOn(targetId: number) {
+    if (dragId == null || dragId === targetId) { setDragId(null); return }
+    setDefinitions((prev) => {
+      const arr = [...prev]
+      const from = arr.findIndex((d) => d.id === dragId)
+      const to = arr.findIndex((d) => d.id === targetId)
+      if (from < 0 || to < 0) return prev
+      const [moved] = arr.splice(from, 1)
+      arr.splice(to, 0, moved)
+      void persistOrder(arr)
+      return arr
+    })
+    setDragId(null)
+  }
+
   function activeVariantCount(defId: number): number {
     return variants.filter((v) => v.inventory_item_definition_id === defId && v.is_active).length
   }
@@ -95,7 +119,8 @@ export function InventoryTypes() {
   }
 
   function globalSafetyConfiguredCount(defId: number): number {
-    return variants.filter((v) => v.inventory_item_definition_id === defId && v.is_active && v.global_safety_stock > 0).length
+    // 有設門檻（global_threshold > 0）才算「已開啟監控」。
+    return variants.filter((v) => v.inventory_item_definition_id === defId && v.is_active && v.global_threshold > 0).length
   }
 
   function openCreate() {
@@ -157,10 +182,25 @@ export function InventoryTypes() {
 
   async function handleAddVariant() {
     if (!variantEditorFor) return
+    // 防呆：一定要輸入規格文字才能新增，不再自動帶入「無規格」。
+    const spec = newSpec.trim()
+    if (!spec) {
+      alert('請先輸入規格文字才能新增。')
+      return
+    }
+    // 同一品項下避免重複規格。
+    const dup = variants.some(
+      (v) => v.inventory_item_definition_id === variantEditorFor.id && (v.specification ?? '').trim() === spec
+    )
+    if (dup) {
+      alert(`規格「${spec}」已存在。`)
+      return
+    }
     const { error } = await supabase.from('inventory_item_variant').insert({
       inventory_item_definition_id: variantEditorFor.id,
-      specification: newSpec.trim() || null,
+      specification: spec,
       global_safety_stock: 0,
+      global_threshold: 0,
       is_active: true,
     })
     if (error) {
@@ -171,12 +211,63 @@ export function InventoryTypes() {
     void load()
   }
 
+  // 編輯規格名稱（修正打錯的文字）。
+  async function handleRenameVariant(variant: InventoryItemVariant) {
+    const next = prompt('修改規格名稱：', variant.specification ?? '')
+    if (next === null) return // 取消
+    const spec = next.trim()
+    if (!spec) {
+      alert('規格名稱不可空白。')
+      return
+    }
+    if (spec === (variant.specification ?? '').trim()) return
+    const dup = variants.some(
+      (v) => v.id !== variant.id && v.inventory_item_definition_id === variant.inventory_item_definition_id && (v.specification ?? '').trim() === spec
+    )
+    if (dup) {
+      alert(`規格「${spec}」已存在。`)
+      return
+    }
+    const { error } = await supabase
+      .from('inventory_item_variant')
+      .update({ specification: spec, updated_at: new Date().toISOString() })
+      .eq('id', variant.id)
+    if (error) {
+      setError(error.message)
+      return
+    }
+    void load()
+  }
+
+  // 刪除規格（給新增錯的用）。若已被物資使用則會有外鍵限制，改提示用停用。
+  async function handleDeleteVariant(variant: InventoryItemVariant) {
+    if (!confirm(`確定刪除規格「${variant.specification ?? '無規格'}」嗎？此動作無法復原。`)) return
+    // 先檢查是否已有物資引用此規格，有的話不可刪除。
+    const { count } = await supabase
+      .from('supply_item')
+      .select('id', { count: 'exact', head: true })
+      .eq('inventory_item_variant_id', variant.id)
+    if ((count ?? 0) > 0) {
+      alert(`此規格已被 ${count} 筆物資使用，無法刪除。請改用「停用」。`)
+      return
+    }
+    const { error } = await supabase.from('inventory_item_variant').delete().eq('id', variant.id)
+    if (error) {
+      alert(`刪除失敗（可能已被物資使用）：${error.message}。請改用「停用」。`)
+      return
+    }
+    void load()
+  }
+
   function openGlobalSafetyEditor(def: InventoryItemDefinition) {
     const draft: Record<number, string> = {}
+    const thresholdDraft: Record<number, string> = {}
     for (const variant of variants.filter((v) => v.inventory_item_definition_id === def.id && v.is_active)) {
       draft[variant.id] = (variant.global_safety_stock ?? 0).toString()
+      thresholdDraft[variant.id] = (variant.global_threshold ?? 0).toString()
     }
     setGlobalSafetyDraft(draft)
+    setGlobalThresholdDraft(thresholdDraft)
     setGlobalSafetyEditorFor(def)
   }
 
@@ -193,7 +284,11 @@ export function InventoryTypes() {
       targetVariants.map((variant) =>
         supabase
           .from('inventory_item_variant')
-          .update({ global_safety_stock: Math.max(0, Number(globalSafetyDraft[variant.id] ?? 0) || 0), updated_at: new Date().toISOString() })
+          .update({
+            global_safety_stock: Math.max(0, Number(globalSafetyDraft[variant.id] ?? 0) || 0),
+            global_threshold: Math.max(0, Number(globalThresholdDraft[variant.id] ?? 0) || 0),
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', variant.id)
       )
     )
@@ -203,6 +298,7 @@ export function InventoryTypes() {
       setError(failed.error.message)
       return
     }
+    void logActivity({ action: 'global_threshold_update', category: '資料維護', targetTable: 'inventory_item_variant', targetId: globalSafetyEditorFor.id, summary: `設定總量門檻：${globalSafetyEditorFor.category}｜${globalSafetyEditorFor.item_name}` })
     setGlobalSafetyEditorFor(null)
     void load()
   }
@@ -275,6 +371,7 @@ export function InventoryTypes() {
       }
     }
     setSaving(false)
+    void logActivity({ action: 'safety_threshold_update', category: '資料維護', targetTable: 'location_inventory_safety_stock', targetId: safetyEditorFor.id, summary: `設定據點門檻：${safetyEditorFor.category}｜${safetyEditorFor.item_name}` })
     setSafetyEditorFor(null)
     void load()
   }
@@ -348,6 +445,7 @@ export function InventoryTypes() {
             <table className="table table-hover align-middle mb-0">
               <thead className="table-light">
                 <tr>
+                  <th className="col-min" title="拖拉調整順序"><i className="bi bi-arrows-move" /></th>
                   <th>物資種類</th>
                   <th>物資名稱</th>
                   <th>庫存分類</th>
@@ -362,19 +460,29 @@ export function InventoryTypes() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={9} className="text-center text-muted py-4">
+                    <td colSpan={10} className="text-center text-muted py-4">
                       載入中…
                     </td>
                   </tr>
                 ) : filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="text-center text-muted py-4">
+                    <td colSpan={10} className="text-center text-muted py-4">
                       尚未建立庫存種類
                     </td>
                   </tr>
                 ) : (
                   filtered.map((def) => (
-                    <tr key={def.id}>
+                    <tr
+                      key={def.id}
+                      draggable={canReorder}
+                      onDragStart={() => canReorder && setDragId(def.id)}
+                      onDragOver={(e) => { if (canReorder) e.preventDefault() }}
+                      onDrop={() => canReorder && handleDropOn(def.id)}
+                      style={canReorder && dragId === def.id ? { opacity: 0.5 } : undefined}
+                    >
+                      <td className="col-min text-center text-muted" style={{ cursor: canReorder ? 'grab' : 'not-allowed' }} title={canReorder ? '拖拉調整順序' : '清除篩選後才能拖拉排序'}>
+                        <i className="bi bi-grip-vertical" />
+                      </td>
                       <td>{def.category}</td>
                       <td>
                         <strong>{def.item_name}</strong>
@@ -516,28 +624,53 @@ export function InventoryTypes() {
                 <button type="button" className="btn-close" onClick={() => setGlobalSafetyEditorFor(null)} />
               </div>
               <div className="modal-body">
-                <div className="alert alert-warning small">
-                  系統會加總所有據點的同一規格庫存；低於此固定門檻時，戰情總覽會列為「總量不足」，提醒啟動募資。設定為 0 表示不監控。
+                <div className="alert alert-warning small mb-3">
+                  系統會加總所有據點的同一規格庫存。<strong>募資啟動條件：當前總庫存 &lt; 門檻 × 0.9</strong>。
+                  門檻設為 0 表示不監控該規格。
                 </div>
                 <table className="table align-middle mb-0">
-                  <thead><tr><th>規格</th><th>總量安全庫存（{globalSafetyEditorFor.unit}）</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th>規格</th>
+                      <th>門檻（{globalSafetyEditorFor.unit}）</th>
+                      <th>安全庫存量（{globalSafetyEditorFor.unit}）</th>
+                      <th className="text-muted small">觸發點</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {variants.filter((v) => v.inventory_item_definition_id === globalSafetyEditorFor.id && v.is_active).map((variant) => (
-                      <tr key={variant.id}>
-                        <td>{variant.specification ?? '無規格'}</td>
-                        <td>
-                          <input
-                            className="form-control"
-                            type="number"
-                            min={0}
-                            value={globalSafetyDraft[variant.id] ?? '0'}
-                            onChange={(e) => setGlobalSafetyDraft({ ...globalSafetyDraft, [variant.id]: e.target.value })}
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                    {variants.filter((v) => v.inventory_item_definition_id === globalSafetyEditorFor.id && v.is_active).map((variant) => {
+                      // 觸發點＝門檻 × 0.9（當前總庫存低於此值即啟動募資）。
+                      const trigger = Math.floor((Number(globalThresholdDraft[variant.id] ?? 0) || 0) * 0.9)
+                      const monitored = (Number(globalThresholdDraft[variant.id] ?? 0) || 0) > 0
+                      return (
+                        <tr key={variant.id}>
+                          <td>{variant.specification ?? '無規格'}</td>
+                          <td>
+                            <input
+                              className="form-control"
+                              type="number"
+                              min={0}
+                              value={globalThresholdDraft[variant.id] ?? '0'}
+                              onChange={(e) => setGlobalThresholdDraft({ ...globalThresholdDraft, [variant.id]: e.target.value })}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              className="form-control"
+                              type="number"
+                              min={0}
+                              value={globalSafetyDraft[variant.id] ?? '0'}
+                              onChange={(e) => setGlobalSafetyDraft({ ...globalSafetyDraft, [variant.id]: e.target.value })}
+                            />
+                          </td>
+                          <td className="small">
+                            {monitored ? <>低於 <strong>{trigger}</strong> 時募資</> : <span className="text-muted">未監控</span>}
+                          </td>
+                        </tr>
+                      )
+                    })}
                     {variants.filter((v) => v.inventory_item_definition_id === globalSafetyEditorFor.id && v.is_active).length === 0 && (
-                      <tr><td colSpan={2} className="text-muted text-center py-4">請先在「規格」中新增規格。</td></tr>
+                      <tr><td colSpan={4} className="text-muted text-center py-4">請先在「規格」中新增規格。</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -568,11 +701,12 @@ export function InventoryTypes() {
                 <div className="input-group mb-3">
                   <input
                     className="form-control"
-                    placeholder="輸入新規格；無規格可留空"
+                    placeholder="輸入新規格（必填）"
                     value={newSpec}
                     onChange={(e) => setNewSpec(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleAddVariant() } }}
                   />
-                  <button className="btn btn-primary" onClick={() => void handleAddVariant()}>
+                  <button className="btn btn-primary" disabled={!newSpec.trim()} onClick={() => void handleAddVariant()}>
                     <i className="bi bi-plus-circle" /> 新增規格
                   </button>
                 </div>
@@ -592,16 +726,23 @@ export function InventoryTypes() {
                           <td>{v.specification ?? '無規格'}</td>
                           <td>{v.is_active ? '啟用' : '停用'}</td>
                           <td>
-                            {v.is_active && (
-                              <button className="btn btn-sm btn-outline-danger" onClick={() => void handleDisableVariant(v)}>
-                                停用
+                            <div className="d-flex gap-1 flex-wrap">
+                              <button className="btn btn-sm btn-outline-primary" title="編輯規格名稱" onClick={() => void handleRenameVariant(v)}>
+                                編輯
                               </button>
-                            )}
-                            {!v.is_active && (
-                              <button className="btn btn-sm btn-outline-success" onClick={() => void handleEnableVariant(v)}>
-                                啟用
+                              {v.is_active ? (
+                                <button className="btn btn-sm btn-outline-danger" onClick={() => void handleDisableVariant(v)}>
+                                  停用
+                                </button>
+                              ) : (
+                                <button className="btn btn-sm btn-outline-success" onClick={() => void handleEnableVariant(v)}>
+                                  啟用
+                                </button>
+                              )}
+                              <button className="btn btn-sm btn-danger" title="刪除此規格（新增錯誤時用；已被物資使用者無法刪除）" onClick={() => void handleDeleteVariant(v)}>
+                                刪除
                               </button>
-                            )}
+                            </div>
                           </td>
                         </tr>
                       ))}

@@ -3,9 +3,15 @@
 // menu page so stock-in has a dedicated, bookmarkable entry point.
 import { Link, useNavigate } from 'react-router-dom'
 import { SupplyItemForm } from '../components/SupplyItemForm'
+import { useAuth } from '../hooks/useAuth'
+import { Roles } from '../lib/enums'
 
 export function StockIn() {
   const navigate = useNavigate()
+  const { profile } = useAuth()
+  const isAdmin = profile?.role_name === Roles.Admin
+  // 物資清單僅總管可看；幫主入庫成功後回物資總覽。
+  const afterSaved = isAdmin ? '/supply-items' : '/'
 
   return (
     <div className="container mt-4">
@@ -13,15 +19,16 @@ export function StockIn() {
         <h2>
           <i className="bi bi-box-arrow-in-down" /> 物資入庫
         </h2>
-        <Link className="btn btn-outline-secondary" to="/supply-items">
-          <i className="bi bi-list-ul" /> 物資清單
-        </Link>
+        {isAdmin && (
+          <Link className="btn btn-outline-secondary" to="/supply-items">
+            <i className="bi bi-list-ul" /> 物資清單
+          </Link>
+        )}
       </div>
 
       <div className="card shadow-sm">
         <div className="card-body">
-          {/* 入庫成功後回到物資清單，並在那裡顯示成功訊息（避免停在空表單） */}
-          <SupplyItemForm onSaved={(m) => navigate('/supply-items', { state: { flash: m } })} submitLabel="確認入庫" />
+          <SupplyItemForm onSaved={(m) => navigate(afterSaved, { state: { flash: m } })} submitLabel="確認入庫" />
         </div>
       </div>
     </div>
