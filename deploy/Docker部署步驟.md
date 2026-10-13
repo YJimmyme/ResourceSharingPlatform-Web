@@ -1,6 +1,6 @@
 # 部署 AI 辨識服務（愛心轉運站的 AI 智慧入庫功能）
 
-愛心轉運站網站**維持原本的 GitHub Pages**（https://bill1114.github.io/ResourceSharingPlatform-Web/），不另外架網站。
+愛心轉運站網站**使用正式網域**（https://yunfull-mm.org.tw/ResourceSharingPlatform-Web/），不另外架網站。
 只把 AI 辨識服務放到另一台已對外提供服務的電腦，經由那台電腦既有的 HTTPS 網址提供給網站呼叫。
 
 ```text
@@ -53,7 +53,7 @@ cp deploy/.env.vision.example deploy/.env.vision      # Windows：copy deploy\.e
 |---|---|
 | SUPABASE_URL、SUPABASE_ANON_KEY | 和網站相同的 Supabase 專案（後台 → Project Settings → API） |
 | SUPABASE_SERVICE_ROLE_KEY | service_role key，**機密，只放這個檔案** |
-| APP_ORIGIN | `https://bill1114.github.io`（只有協定和主機，**不含** `/ResourceSharingPlatform-Web/`） |
+| APP_ORIGIN | `https://yunfull-mm.org.tw`（只有協定和主機，**不含** `/ResourceSharingPlatform-Web/`） |
 | VISION_PUBLIC_ORIGIN | `https://vision.example.org`（辨識服務對外網址，不含結尾斜線） |
 | VISION_PORT | 容器在主機上的埠，預設 8000，只綁 127.0.0.1；被占用就換一個，反向代理一起改 |
 | OPENAI_API_KEY | 雲端複核用；留空就不呼叫 OpenAI，需複核的照片改人工核對 |
@@ -121,7 +121,7 @@ vision.example.org {
 
 IIS 請使用 URL Rewrite + Application Request Routing 建立同樣的反向代理，並把要求大小上限調到 64 MB、逾時 300 秒。
 
-**注意：** AI 模型管理頁會用 iframe 嵌入 `https://vision.example.org/workbench`。如果伺服器全域加了 `X-Frame-Options: DENY/SAMEORIGIN` 或 `Content-Security-Policy: frame-ancestors`，請在這個站台移除，或改成允許 `https://bill1114.github.io`，否則 AI 模型管理頁會是空白。
+**注意：** AI 模型管理頁會用 iframe 嵌入 `https://vision.example.org/workbench`。如果伺服器全域加了 `X-Frame-Options: DENY/SAMEORIGIN` 或 `Content-Security-Policy: frame-ancestors`，請在這個站台移除，或改成允許 `https://yunfull-mm.org.tw`，否則 AI 模型管理頁會是空白。
 
 設定後在任一台電腦確認：`https://vision.example.org/health` 應回傳 `{"status":"ok",...}`。
 
@@ -180,7 +180,7 @@ docker compose --env-file deploy/.env.vision -f deploy/compose.vision.yaml down
 
 | 狀況 | 原因與處理 |
 |---|---|
-| AI 智慧入庫按辨識後出現網路錯誤，瀏覽器主控台有 CORS 字樣 | `APP_ORIGIN` 不是 `https://bill1114.github.io`（多了路徑或斜線），改 `.env.vision` 後 `up -d` |
+| AI 智慧入庫按辨識後出現網路錯誤，瀏覽器主控台有 CORS 字樣 | `APP_ORIGIN` 不是 `https://yunfull-mm.org.tw`（多了路徑或斜線），改 `.env.vision` 後 `up -d` |
 | 辨識時「來源不符」 | 同上；或從工作台操作時 `VISION_PUBLIC_ORIGIN` 和實際網址不一致 |
 | AI 模型管理空白 | 伺服器送出 X-Frame-Options 或 frame-ancestors 阻擋嵌入（見第 4 步注意） |
 | AI 模型管理一直「等待主系統登入授權」 | `APP_ORIGIN` 不正確，工作台不接受網站傳來的登入 |
